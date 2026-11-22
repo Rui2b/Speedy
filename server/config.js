@@ -1,7 +1,9 @@
 /**
- * 配置中心。
- * 所有魔法数字集中在这里,方便后续调整地图、速度、宠物规则。
- * 优先读取环境变量,其次使用下面的默认值。
+ * Central configuration.
+ *
+ * Every magic number lives here so map layout, speed and pet rules can be
+ * tuned without touching the simulation. Environment variables win, then the
+ * defaults below.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(__dirname, '..');
 
-/** 极简 .env 解析,避免引入额外依赖。已存在的环境变量优先。 */
+/** Minimal .env parser, no extra dependency. Existing env vars win. */
 function loadDotEnv() {
   const envPath = path.join(ROOT_DIR, '.env');
   if (!fs.existsSync(envPath)) return;
@@ -47,7 +49,7 @@ function bool(key, fallback) {
 }
 
 /* ------------------------------------------------------------------------- *
- * 网络
+ * Network
  * ------------------------------------------------------------------------- */
 export const NETWORK = {
   host: process.env.HOST || '127.0.0.1',
@@ -56,21 +58,23 @@ export const NETWORK = {
 };
 
 /* ------------------------------------------------------------------------- *
- * 时序:客户端 20Hz 上传 / 服务器 20 tick 模拟 / 10Hz 下行广播
+ * Timing: client reports at 20Hz, the server simulates 20 ticks/s and
+ * broadcasts at 10Hz.
  * ------------------------------------------------------------------------- */
 export const TIMING = {
   tickRate: num('TICK_RATE', 20),
   broadcastRate: num('BROADCAST_RATE', 10),
-  /** 心跳间隔,双向 ping/pong,防止 OCI NAT 掐断空闲连接 */
+  /** Heartbeat interval. Both directions ping so NAT never drops an idle link. */
   heartbeatIntervalMs: 3000,
-  /** 超过这么久没收到任何上行包视为连接可能已死 */
+  /** No upstream packet for this long means the connection is probably dead. */
   heartbeatTimeoutMs: 10000,
   /**
-   * 输入过期时间:超过这么久没收到新的输入包,服务器按"无输入"处理。
-   * 必须大于后台标签页的 5Hz 上报间隔(200ms),否则会误判为松开按键。
+   * Input expiry. After this long without a new input packet the server treats
+   * the player as pressing nothing. Must stay above the 200ms background
+   * reporting interval, or keys look released every time a tab is hidden.
    */
   inputStaleMs: num('INPUT_STALE_MS', 450),
-  /** 单包最大字节数,防内存炸 */
+  /** Maximum packet size in bytes, so one client cannot exhaust memory. */
   maxPayloadBytes: 4096,
 };
 TIMING.tickMs = 1000 / TIMING.tickRate;
@@ -78,21 +82,21 @@ TIMING.broadcastEveryNTicks = Math.max(1, Math.round(TIMING.tickRate / TIMING.br
 TIMING.broadcastMs = 1000 / TIMING.broadcastRate;
 
 /* ------------------------------------------------------------------------- *
- * 玩家物理(服务器权威)
+ * Player physics (server authoritative)
  * ------------------------------------------------------------------------- */
 export const PHYSICS = {
   maxSpeed: num('PLAYER_MAX_SPEED', 6),          // units/s
   acceleration: num('PLAYER_ACCELERATION', 12),  // units/s^2
-  friction: num('PLAYER_FRICTION', 0.9),         // 每 tick 的无输入阻尼系数
+  friction: num('PLAYER_FRICTION', 0.9),         // damping per tick with no input
   jumpImpulse: num('PLAYER_JUMP_IMPULSE', 7.5),  // units/s
   gravity: num('PLAYER_GRAVITY', 22),            // units/s^2
   groundY: 0,
-  /** 空中时的水平操控衰减 */
+  /** Horizontal control multiplier while airborne */
   airControl: 0.35,
 };
 
 /* ------------------------------------------------------------------------- *
- * 玩法规则
+ * Game rules
  * ------------------------------------------------------------------------- */
 export const RULES = {
   gemPickupRadius: 2.2,
@@ -100,9 +104,9 @@ export const RULES = {
   petHatchRadius: 2.5,
   petStealCooldownMs: 12_000,   // per pet
   petHatchCooldownMs: 20_000,   // per pet
-  /** 每次成功孵化动作增加的进度 */
+  /** Progress added by one successful hatch action */
   hatchProgressPerAction: 25,
-  /** 宝石被拾取后重新刷新的时间 */
+  /** Time before a collected gem respawns */
   gemRespawnMs: 8_000,
 };
 
@@ -110,27 +114,27 @@ export const GAME = {
   maxOnline: num('MAX_ONLINE', 30),
   maxGems: 24,
   maxPets: 8,
-  /** 地图可行走半径(圆形场地),防止玩家跑出世界 */
+  /** Walkable radius of the round field, in metres */
   worldRadius: 40,
   spawnRadius: 26,
 };
 
 /* ------------------------------------------------------------------------- *
- * 防作弊
+ * Anti-cheat
  * ------------------------------------------------------------------------- */
 export const ANTI_CHEAT = {
-  /** 单 tick 允许位移 = maxSpeed * dt * 该倍数 */
+  /** Allowed displacement per tick = maxSpeed * dt * this factor */
   displacementTolerance: num('CHEAT_DISPLACEMENT_TOLERANCE', 1.45),
-  /** 客户端预览坐标与权威坐标允许的最大偏差 */
+  /** Maximum drift between the reported position and the authoritative one */
   maxDrift: num('CHEAT_MAX_DRIFT', 3.5),
-  /** 触发多少次异常后断开连接,0 表示只记日志 */
+  /** Strikes before the connection is dropped. 0 only logs. */
   strikesBeforeKick: num('CHEAT_STRIKES_BEFORE_KICK', 8),
   maxInputPacketsPerSec: num('MAX_INPUT_PACKETS_PER_SEC', 22),
   maxActionPacketsPerSec: num('MAX_ACTION_PACKETS_PER_SEC', 10),
 };
 
 /* ------------------------------------------------------------------------- *
- * 数据库与会话
+ * Database and sessions
  * ------------------------------------------------------------------------- */
 export const DB = {
   url: process.env.DATABASE_URL || '',
@@ -143,7 +147,7 @@ export const DB = {
 export const AUTH = {
   secret: process.env.SESSION_SECRET || '',
   sessionTtlMs: num('SESSION_TTL_HOURS', 12) * 60 * 60 * 1000,
-  /** scrypt 参数 */
+  /** scrypt parameters */
   scryptN: 16384,
   scryptR: 8,
   scryptP: 1,
@@ -161,8 +165,8 @@ export const LOG = {
 };
 
 /* ------------------------------------------------------------------------- *
- * 地图刷新点(服务端配置,前端不可控)
- * 修改这里即可改地图布局。
+ * Spawn points. Server side only; the client cannot influence these.
+ * Edit this list to change the map layout.
  * ------------------------------------------------------------------------- */
 export const GEM_SPAWN_POINTS = [
   { x: 14, z: 0 }, { x: 9.9, z: 9.9 }, { x: 0, z: 14 }, { x: -9.9, z: 9.9 },

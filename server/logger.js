@@ -1,7 +1,8 @@
 /**
- * 日志工具。
- * - 普通日志:统一前缀,便于 PM2/systemd/journalctl 检索。
- * - 作弊日志:单独落到文件,一行一条 JSON,方便后续脚本统计。
+ * Logging.
+ * - Operational logs share one prefix so systemd and journalctl stay searchable.
+ * - Anti-cheat events go to their own file, one JSON object per line, so a
+ *   script can aggregate them later.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,7 +18,7 @@ function ensureCheatStream() {
   fs.mkdirSync(path.dirname(LOG.cheatLogFile), { recursive: true });
   cheatStream = fs.createWriteStream(LOG.cheatLogFile, { flags: 'a' });
   cheatStream.on('error', (err) => {
-    // 作弊日志写失败不能影响主流程
+    // A failed cheat-log write must never break the game loop
     console.error(`[warn] cheat log stream error: ${err.message}`);
   });
   return cheatStream;
@@ -54,9 +55,9 @@ export function createLogger(scope) {
 }
 
 /**
- * 记录一条作弊/异常事件。uid/sessionId 只记录脱敏后的短标识。
+ * Record one anti-cheat event. Only short identifiers are stored.
  * @param {object} event
- * @param {string} event.reason  事件类型,例如 'input_rate' / 'displacement' / 'invalid_action'
+ * @param {string} event.reason one of 'input_rate', 'displacement', 'invalid_action'
  */
 export function logCheat(event) {
   const record = { ts: stamp(), ...event };
@@ -69,7 +70,7 @@ export function logCheat(event) {
   try {
     ensureCheatStream().write(`${line}\n`);
   } catch {
-    /* 忽略磁盘异常 */
+    /* ignore disk errors */
   }
 }
 

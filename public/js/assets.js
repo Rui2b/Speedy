@@ -1,49 +1,58 @@
 /**
- * 美术资源与地图配置(与逻辑分离)。
+ * Art assets and map configuration, kept apart from logic.
  *
- * 想换皮肤贴图 / 地图模型 / 配色,只改这个文件,不用碰渲染与联网代码。
+ * The world is a school running track at dusk: dark asphalt, concentric lane
+ * paint, chalk marks. Colours here are the ones the 3D field uses, so the
+ * interface chrome can stay neutral and let the field carry the colour.
+ *
+ * To reskin, change values in this file only.
  */
 
-/** 皮肤定义:颜色 + 贴图(贴图留空则使用纯色)。 */
+/** Skins: body colour plus a trim colour. Add a texture map when you have one. */
 export const SKINS = {
-  classic: { body: 0x4ade80, accent: 0x22c55e, map: null },
-  sprout: { body: 0x86efac, accent: 0x16a34a, map: null },
-  ember: { body: 0xf97316, accent: 0xdc2626, map: null },
-  frost: { body: 0x7dd3fc, accent: 0x0284c7, map: null },
-  bolt: { body: 0xfde047, accent: 0xca8a04, map: null },
-  shadow: { body: 0x6b7280, accent: 0x374151, map: null },
+  classic: { body: 0xd9d3c6, accent: 0xe5a84b, map: null },
+  sprout: { body: 0xb9c9a4, accent: 0x8fae74, map: null },
+  ember: { body: 0xd99a7a, accent: 0xb4573a, map: null },
+  frost: { body: 0xb6c6d4, accent: 0x7e9bb5, map: null },
+  bolt: { body: 0xded3a9, accent: 0xc0a341, map: null },
+  shadow: { body: 0x8b8681, accent: 0x514c47, map: null },
 };
 
 export const DEFAULT_SKIN = 'classic';
 
-/** 场景配色,便于整体调性调整。 */
+/** Scene colours. Warm ink ramp, amber lane paint. */
 export const PALETTE = {
-  sky: 0x0b1120,
-  fog: 0x0b1120,
-  ground: 0x16233a,
-  groundEdge: 0x24344f,
-  grid: 0x2b3f5c,
-  gem: 0x38bdf8,
-  gemGlow: 0x0ea5e9,
-  pet: 0xf472b6,
-  petHatched: 0x4ade80,
-  selfRing: 0x4ade80,
-  otherRing: 0x64748b,
+  sky: 0x14120f,
+  fog: 0x14120f,
+  ground: 0x24211d,
+  /** Worn track surfacing between the infield and the boundary */
+  track: 0x312c26,
+  groundEdge: 0x2a2724,
+  lane: 0x6f6659,
+  laneAccent: 0xe5a84b,
+  chalk: 0x8c8172,
+  gem: 0xe8d2a4,
+  gemGlow: 0xc9973f,
+  pet: 0xd8b0a8,
+  petOwned: 0xe0bb8a,
+  petHatched: 0x9fd3a5,
+  selfRing: 0xe5a84b,
+  otherRing: 0x7d766c,
 };
 
-/** 地图参数。改这里就能改场地大小与密度。 */
+/** Map parameters. Change these to change the field. */
 export const MAP = {
-  size: 96,
-  gridDivisions: 48,
-  /** 场地围墙高度与厚度 */
-  wallHeight: 3.2,
-  wallThickness: 0.9,
-  /** 世界半径,必须与服务器 GAME.worldRadius 保持一致 */
+  /** Track radius in metres. Must match GAME.worldRadius on the server. */
   worldRadius: 40,
-  /** 环境光/主光 */
-  ambientIntensity: 0.85,
-  directionalIntensity: 1.15,
-  /** 本地预测速度(仅视觉,真实速度由服务器决定) */
+  /** How many painted lanes to draw */
+  laneCount: 6,
+  /** Lane line thickness in metres */
+  laneWidth: 0.16,
+  /** Spacing between lane centre lines in metres */
+  laneSpacing: 5.4,
+  ambientIntensity: 1.05,
+  directionalIntensity: 1.5,
+  /** Local prediction speed (visual only; the server owns the real speed) */
   predictedSpeed: 6,
   camera: {
     distance: 13,
@@ -51,9 +60,17 @@ export const MAP = {
     lookAhead: 2.4,
     lerpRate: 9,
   },
+  /** Slow orbit used behind the sign-in panel */
+  attract: {
+    radius: 30,
+    height: 15,
+    speed: 0.028,
+    /** Look slightly past the centre so the lanes sweep across the frame */
+    focus: { x: 0, y: 0.6, z: -6 },
+  },
 };
 
-/** 模型尺寸(单位 = 米) */
+/** Model sizes in metres. */
 export const SIZES = {
   playerBody: { x: 0.85, y: 1.15, z: 0.85 },
   playerHead: 0.52,
@@ -63,7 +80,7 @@ export const SIZES = {
   ringOuter: 0.92,
 };
 
-/** 音效留白:后续可替换成真实音频文件。 */
+/** Audio slots. Replace with real files when you have them. */
 export const SOUNDS = {
   pickup: null,
   steal: null,

@@ -12,3 +12,7 @@ coverage/
 # 方案草稿不进仓库
 agent-plan.txt
 
+
+# Local agent tooling, not part of the project
+.agents/
+

@@ -1,20 +1,21 @@
 /**
- * Speedy 边缘网关 Worker。
+ * Speedy edge gateway Worker.
  *
- * 职责(严格边界,不含任何游戏逻辑):
- *   1. 托管前端静态资源(Workers Assets,全球 CDN)
- *   2. 把 /ws 的 WebSocket 双向透传到源站 Node 权威服
+ * Two jobs only. It holds no game logic.
+ *   1. Serve the front end as Workers Assets from the global edge.
+ *   2. Tunnel /ws (and /api/*) through to the Node origin.
  *
- * 实现:用 fetch 带 Upgrade 头连上源站,拿到 origin 侧的 WebSocket,
- * 再与浏览器侧用 WebSocketPair 配对,双向转发帧。
- * Worker 不解析任何游戏消息,只做字节搬运 + 关闭码协调。
+ * How the WebSocket proxy works: fetch() to the origin with an Upgrade header
+ * returns the origin's socket on response.webSocket. That socket is paired with
+ * a WebSocketPair for the browser and frames are copied both ways. The Worker
+ * never parses a game packet, it only moves bytes and coordinates close codes.
  */
 
 const WS_PATH = '/ws';
-/** 这些前缀都交给源站 Node 处理(登录、健康检查) */
+/** Paths that belong to the Node origin (the game channel and the JSON API) */
 const ORIGIN_PREFIXES = ['/ws', '/api/'];
 
-/** Workers 运行时不接受的关闭码,转发时必须替换。 */
+/** Close codes the Workers runtime refuses to forward */
 const UNSENDABLE_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
 
 export default {
@@ -34,7 +35,10 @@ export default {
   },
 };
 
-/** 计算源站 URL。优先用完整的 ORIGIN_URL,便于本地联调(http://127.0.0.1:8080)。 */
+/**
+ * Resolve the origin URL. ORIGIN_URL wins so a local origin works in dev
+ * (http://127.0.0.1:8080); ORIGIN_HOST is the plain host form.
+ */
 function originTarget(env, requestUrl) {
   const raw = env.ORIGIN_URL || (env.ORIGIN_HOST ? `https://${env.ORIGIN_HOST}` : '');
   if (!raw) return null;
@@ -45,10 +49,10 @@ function originTarget(env, requestUrl) {
   return url;
 }
 
-/** 普通 HTTP 请求(API)透传 */
+/** Plain HTTP passthrough for the JSON API. */
 async function proxyHttp(request, env) {
   const target = originTarget(env, request.url);
-  if (!target) return new Response('ORIGIN_HOST not configured', { status: 500 });
+  if (!target) return new Response('ORIGIN_URL is not configured', { status: 500 });
 
   const headers = new Headers(request.headers);
   headers.set('X-Forwarded-Host', new URL(request.url).host);
@@ -73,7 +77,7 @@ async function proxyWebSocket(request, env) {
   }
 
   const originUrl = originTarget(env, request.url);
-  if (!originUrl) return new Response('ORIGIN_HOST not configured', { status: 500 });
+  if (!originUrl) return new Response('ORIGIN_URL is not configured', { status: 500 });
   const clientUrl = new URL(request.url);
 
   let originResp;
@@ -95,7 +99,7 @@ async function proxyWebSocket(request, env) {
 
   const originWs = originResp.webSocket;
   if (!originWs) {
-    // 源站拒绝升级:把源站的状态码原样带回,便于前端提示
+    // Pass the origin's status through so the page can report something useful
     return new Response(`Origin refused upgrade (${originResp.status})`, {
       status: originResp.status === 101 ? 502 : originResp.status,
     });
@@ -107,7 +111,7 @@ async function proxyWebSocket(request, env) {
   const [clientWs, serverWs] = Object.values(pair);
   serverWs.accept();
 
-  // 浏览器 → 源站
+  // Browser to origin
   serverWs.addEventListener('message', (event) => {
     try {
       originWs.send(event.data);
@@ -121,7 +125,7 @@ async function proxyWebSocket(request, env) {
     safeClose(originWs, event.code, event.reason);
   });
 
-  // 源站 → 浏览器
+  // Origin to browser
   originWs.addEventListener('message', (event) => {
     try {
       serverWs.send(event.data);
@@ -138,13 +142,13 @@ async function proxyWebSocket(request, env) {
   return new Response(null, { status: 101, webSocket: clientWs });
 }
 
-/** 不抛异常地关闭连接,并把不可发送的关闭码替换成 1011。 */
+/** Close without throwing, replacing codes the runtime will not send. */
 function safeClose(ws, code, reason) {
   try {
     if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) return;
     const sendable =
       Number.isInteger(code) && code >= 1000 && code < 5000 && !UNSENDABLE_CLOSE_CODES.has(code);
-    // reason 上限 123 字节,超长会被运行时拒绝
+    // Reasons are capped at 123 bytes, longer ones are rejected
     const text = typeof reason === 'string' ? reason.slice(0, 100) : '';
     if (sendable) ws.close(code, text);
     else if (code === 1000) ws.close(1000, text);
@@ -153,7 +157,7 @@ function safeClose(ws, code, reason) {
     try {
       ws.close(1011, 'close_failed');
     } catch {
-      /* 已关闭 */
+      /* already closed */
     }
   }
 }

@@ -1,7 +1,9 @@
 /**
- * 客户端主流程:登录 → 连接 → 渲染循环。
+ * Client entry: sign in, connect, render loop.
  *
- * 严格按方案:页面加载后不刷新;连接只建立一次(断线内部重连)。
+ * The page never reloads. One WebSocket is opened per session and reconnects
+ * internally; the render loop keeps running behind the sign-in panel so the
+ * field is visible before anyone signs in.
  */
 
 import { GameView } from './render.js';
@@ -24,19 +26,17 @@ const el = {
 };
 
 const state = {
-  /** 短期 WS 票据,只放内存,不落 localStorage(避免 XSS 偷取) */
+  /** Short lived WS ticket. Kept in memory only, never in localStorage. */
   wsToken: null,
   uid: null,
   gems: 0,
   pets: [],
-  petCooldowns: new Map(),
   /** gemId -> {x,z} */
   gemsById: new Map(),
   /** petId -> {ownerUid, pos} */
   petsById: new Map(),
   roster: new Map(),
   online: 0,
-  rtt: null,
   lastSelfPos: { x: 0, y: 0, z: 0 },
   starting: false,
 };
@@ -53,13 +53,15 @@ const net = new NetClient({
 });
 
 /* ------------------------------------------------------------------------- *
- * 启动
+ * Startup
  * ------------------------------------------------------------------------- */
 boot();
 
 async function boot() {
-  // 复用 HttpOnly cookie 里的会话:能恢复就直接进游戏,不用重新输密码
-  setLoading(true, '正在恢复会话…');
+  // The field runs behind the sign-in panel from the first frame.
+  view.start();
+
+  setLoading(true, 'Restoring your session');
   try {
     const res = await fetch('/api/session', { credentials: 'same-origin' });
     if (res.ok) {
@@ -72,14 +74,14 @@ async function boot() {
       }
     }
   } catch {
-    /* 网络异常时退回登录 */
+    /* Fall through to the sign-in form */
   }
   setLoading(false);
   showLogin();
 }
 
 /* ------------------------------------------------------------------------- *
- * 登录 / 注册
+ * Sign in and registration
  * ------------------------------------------------------------------------- */
 function showLogin() {
   el.overlay.hidden = false;
@@ -93,14 +95,14 @@ function authError(message) {
 }
 
 const ERROR_TEXT = {
-  invalid_username: '用户名需为 3-20 位字母、数字或下划线',
-  invalid_password: '密码至少 6 位',
-  invalid_credentials: '用户名或密码不正确',
-  username_taken: '这个用户名已被占用',
-  payload_too_large: '请求内容过大',
-  invalid_json: '请求格式错误',
-  server_error: '服务器开小差了,请稍后再试',
-  network: '无法连接服务器',
+  invalid_username: 'Use 3 to 20 letters, digits or underscores',
+  invalid_password: 'Password needs at least 6 characters',
+  invalid_credentials: 'That username and password do not match',
+  username_taken: 'That username is already taken',
+  payload_too_large: 'That request was too large',
+  invalid_json: 'The request could not be read',
+  server_error: 'The server could not handle that. Try again',
+  network: 'Cannot reach the server',
 };
 
 async function submitAuth(mode) {
@@ -128,14 +130,14 @@ async function submitAuth(mode) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
-      authError(ERROR_TEXT[data.error] ?? '登录失败');
+      authError(ERROR_TEXT[data.error] ?? 'Sign in failed');
       return;
     }
 
     state.uid = data.uid;
     await obtainWsTicket();
     if (!state.wsToken) {
-      authError('无法获取连接凭证,请重试');
+      authError('Could not get a connection ticket. Try again');
       return;
     }
     startGame({ uid: data.uid, displayName: data.displayName });
@@ -146,7 +148,7 @@ async function submitAuth(mode) {
   }
 }
 
-/** 从服务端取一个短期 WS 票据,cookie 是唯一凭据。 */
+/** Fetch a short lived ticket for the WebSocket handshake. */
 async function obtainWsTicket() {
   try {
     const res = await fetch('/api/ws-ticket', { credentials: 'same-origin' });
@@ -156,20 +158,15 @@ async function obtainWsTicket() {
       state.wsToken = data.token;
     }
   } catch {
-    /* 失败时退化为 cookie 握手 */
+    /* The handshake falls back to the session cookie */
   }
 }
 
 function setBusy(busy, mode) {
   el.btnLogin.disabled = busy;
   el.btnRegister.disabled = busy;
-  if (busy) {
-    el.btnLogin.textContent = mode === 'login' ? '登录中…' : '进入游戏';
-    el.btnRegister.textContent = mode === 'register' ? '注册中…' : '注册新账号';
-  } else {
-    el.btnLogin.textContent = '进入游戏';
-    el.btnRegister.textContent = '注册新账号';
-  }
+  el.btnLogin.textContent = busy && mode === 'login' ? 'Signing in' : 'Sign in';
+  el.btnRegister.textContent = busy && mode === 'register' ? 'Creating account' : 'Create account';
 }
 
 el.form.addEventListener('submit', (event) => {
@@ -180,23 +177,21 @@ el.form.addEventListener('submit', (event) => {
 el.btnRegister.addEventListener('click', () => submitAuth('register'));
 
 /* ------------------------------------------------------------------------- *
- * 进入游戏
+ * Entering the game
  * ------------------------------------------------------------------------- */
-function startGame(profile) {
+function startGame() {
   if (state.starting) return;
   state.starting = true;
 
   el.overlay.hidden = true;
-  setLoading(true, '正在连接服务器…');
+  setLoading(true, 'Connecting to the server');
 
   hud.showGameUi();
   input.setEnabled(true);
-  view.start();
 
   net.connect();
-  el.username.blur();
-  el.password.blur();
-  // 防止 Chromebook 上软键盘弹出
+
+  // Blur the active field so Chromebooks do not raise the on-screen keyboard
   document.activeElement?.blur?.();
 
   window.addEventListener('keydown', handleActionKey);
@@ -209,7 +204,7 @@ function setLoading(show, text) {
 }
 
 /* ------------------------------------------------------------------------- *
- * 服务器消息
+ * Server messages
  * ------------------------------------------------------------------------- */
 function handleServerMessage(msg) {
   switch (msg.type) {
@@ -219,14 +214,11 @@ function handleServerMessage(msg) {
       state.pets = msg.self?.pets ?? [];
       state.lastSelfPos = msg.self?.pos ?? { x: 0, y: 0, z: 0 };
       state.roster.clear();
-      for (const entry of msg.roster ?? []) {
-        state.roster.set(entry.uid, entry);
-      }
+      for (const entry of msg.roster ?? []) state.roster.set(entry.uid, entry);
       view.applyWelcome(msg);
       hud.setGems(state.gems);
-      hud.setPets(state.pets, state.petCooldowns);
+      hud.setPets(state.pets);
       setLoading(false);
-      hud.toast('已进入游戏', 'good');
       break;
 
     case 'world_snapshot':
@@ -251,7 +243,7 @@ function handleServerMessage(msg) {
       state.gems = msg.gems ?? state.gems;
       state.pets = msg.pets ?? state.pets;
       hud.setGems(state.gems);
-      hud.setPets(state.pets, state.petCooldowns);
+      hud.setPets(state.pets);
       break;
 
     case 'action_result':
@@ -275,55 +267,53 @@ function applySnapshot(msg) {
 
   state.petsById.clear();
   for (const pet of msg.pets ?? []) {
-    state.petsById.set(pet.petId, { ownerUid: pet.ownerUid, pos: pet.pos, hatchProgress: pet.hatchProgress });
+    state.petsById.set(pet.petId, {
+      ownerUid: pet.ownerUid,
+      pos: pet.pos,
+      hatchProgress: pet.hatchProgress,
+    });
   }
   state.online = (msg.players?.length ?? 0) + 1;
   hud.setOnline(state.online);
 }
 
 const ACTION_TEXT = {
-  pick_gem: { ok: '💎 +1', fail: { too_far: '离宝石太远了', gem_unavailable: '宝石已被拿走' } },
+  pick_gem: { ok: '+1 gem', fail: { too_far: 'Too far from that gem', gem_unavailable: 'That gem is gone' } },
   steal_pet: {
-    ok: '🐾 偷到宠物了!',
+    ok: 'Pet stolen',
     fail: {
-      too_far: '离宠物太远了',
-      own_pet: '这是你自己的宠物',
-      pet_wild: '野生宠物不能偷',
-      cooldown: '还在冷却中',
-      owner_offline: '主人不在线',
-      pet_missing: '宠物不存在了',
-      transfer_failed: '转移失败,请重试',
+      too_far: 'Too far from that pet',
+      own_pet: 'That pet is already yours',
+      pet_wild: 'Wild pets cannot be stolen',
+      cooldown: 'That pet is still protected',
+      owner_offline: 'The owner is offline',
+      pet_missing: 'That pet is gone',
+      transfer_failed: 'Could not transfer that pet. Try again',
     },
   },
   hatch_pet: {
-    ok: '🥚 孵化进度 +1',
+    ok: 'Hatch progress added',
     fail: {
-      too_far: '离宠物太远了',
-      not_owner: '这不是你的宠物',
-      already_hatched: '已经孵化完成',
-      cooldown: '还在冷却中',
-      pet_missing: '宠物不存在了',
+      too_far: 'Too far from that pet',
+      not_owner: 'That pet is not yours',
+      already_hatched: 'That pet is already hatched',
+      cooldown: 'Hatching is still on cooldown',
+      pet_missing: 'That pet is gone',
     },
   },
-  pet_lost: { ok: '', fail: { stolen: '⚠️ 你的宠物被偷走了!' } },
+  pet_lost: { ok: '', fail: { stolen: 'Your pet was stolen' } },
 };
 
 function handleActionResult(msg) {
   const table = ACTION_TEXT[msg.action];
   if (msg.ok) {
     if (table?.ok) hud.toast(table.ok, 'good');
-    if (msg.action === 'steal_pet' && msg.petId) {
-      state.petCooldowns.set(msg.petId, Date.now() + 12_000);
-    }
-    if (msg.action === 'hatch_pet' && msg.petId) {
-      state.petCooldowns.set(`hatch:${msg.petId}`, Date.now() + 20_000);
-    }
     return;
   }
 
   const reason = msg.reason;
   if (reason === 'cooldown' && msg.action !== 'pick_gem') {
-    hud.toast('冷却中,稍等一下', 'bad');
+    hud.toast('Still on cooldown', 'bad');
     return;
   }
   const text = table?.fail?.[reason];
@@ -332,16 +322,16 @@ function handleActionResult(msg) {
 
 function errorText(code) {
   const map = {
-    unauthorized: '登录已过期,请重新登录',
-    server_full: '服务器已满,请稍后再试',
-    input_rate_exceeded: '操作过快',
-    payload_too_large: '数据异常',
+    unauthorized: 'Your session expired. Sign in again',
+    server_full: 'The server is full. Try again shortly',
+    input_rate_exceeded: 'Too many inputs',
+    payload_too_large: 'Malformed data',
   };
   return map[code] ?? String(code);
 }
 
 /* ------------------------------------------------------------------------- *
- * 连接状态
+ * Connection state
  * ------------------------------------------------------------------------- */
 function handleConnectionState(nextState, info) {
   switch (nextState) {
@@ -353,15 +343,17 @@ function handleConnectionState(nextState, info) {
       setLoading(false);
       break;
     case 'reconnecting':
-      hud.setConnectionBanner(`连接中断,正在重连 (${info?.attempt ?? 1}/${info?.max ?? 5})…`);
+      hud.setConnectionBanner(
+        `Reconnecting (${info?.attempt ?? 1} of ${info?.max ?? 5})`,
+      );
       break;
     case 'closed':
       hud.setConnectionBanner('');
       if (info?.reason === 'reconnect_exhausted') {
-        hud.toast('连接已断开,请刷新页面', 'bad');
+        hud.toast('Connection lost. Reload the page', 'bad');
         input.setEnabled(false);
       } else if (String(info?.reason ?? '').startsWith('server_')) {
-        hud.toast('服务器拒绝了连接,请重新登录', 'bad');
+        hud.toast('The server closed the connection. Sign in again', 'bad');
         input.setEnabled(false);
       }
       break;
@@ -371,7 +363,7 @@ function handleConnectionState(nextState, info) {
 }
 
 /* ------------------------------------------------------------------------- *
- * 操作按键
+ * Action keys
  * ------------------------------------------------------------------------- */
 function handleActionKey(event) {
   if (!input.enabled) return;
@@ -396,32 +388,32 @@ function doPickOrSteal() {
   const petId = findNearestPet(state.petsById, pos, 3.2, state.uid);
   if (petId) {
     const pet = state.petsById.get(petId);
-    if (!pet || pet.ownerUid === null) hud.toast('野生宠物不能偷', 'bad');
-    else if (pet.ownerUid === state.uid) hud.toast('这是你自己的宠物,按 F 孵化', 'bad');
+    if (!pet || pet.ownerUid === null) hud.toast('Wild pets cannot be stolen', 'bad');
+    else if (pet.ownerUid === state.uid) hud.toast('That is your pet. Press F to hatch', 'bad');
     else net.tryStealPet(petId);
     return;
   }
 
-  hud.toast('附近没有可拾取的东西', '');
+  hud.toast('Nothing to collect nearby', '');
 }
 
 function doHatch() {
   const pos = state.lastSelfPos;
   const petId = findNearestPet(state.petsById, pos, 3.2, state.uid);
   if (!petId) {
-    hud.toast('附近没有你的宠物', '');
+    hud.toast('No pet of yours nearby', '');
     return;
   }
   const pet = state.petsById.get(petId);
   if (!pet || pet.ownerUid !== state.uid) {
-    hud.toast('这不是你的宠物', 'bad');
+    hud.toast('That pet is not yours', 'bad');
     return;
   }
   net.tryHatchPet(petId);
 }
 
 /* ------------------------------------------------------------------------- *
- * 调试钩子(只读快照,便于自动化测试与排查)
+ * Read-only snapshot for automated checks
  * ------------------------------------------------------------------------- */
 if (typeof window !== 'undefined') {
   window.__speedy = {
@@ -430,7 +422,6 @@ if (typeof window !== 'undefined') {
         uid: state.uid,
         gems: state.gems,
         online: state.online,
-        rtt: state.rtt,
         pos: { ...state.lastSelfPos },
         net: net.state,
         pets: state.pets.map((p) => ({ petId: p.petId, hatchProgress: p.hatchProgress })),
@@ -442,7 +433,7 @@ if (typeof window !== 'undefined') {
 }
 
 /* ------------------------------------------------------------------------- *
- * 主循环桥接:输入 → 网络 + 本地预测
+ * Input bridge: sampling and local prediction
  * ------------------------------------------------------------------------- */
 const FRAME = { last: performance.now(), fpsAccum: 0, fpsFrames: 0 };
 
@@ -458,14 +449,12 @@ function clientLoop() {
     hud.setPing(net.rttMs);
   }
 
-  // 帧率统计 + 冷却倒计时刷新
   FRAME.fpsAccum += dt;
   FRAME.fpsFrames += 1;
   if (FRAME.fpsAccum >= 0.5) {
     hud.setFps(FRAME.fpsFrames / FRAME.fpsAccum);
     FRAME.fpsAccum = 0;
     FRAME.fpsFrames = 0;
-    hud.updateCooldownBadges(state.petCooldowns);
   }
 
   requestAnimationFrame(clientLoop);

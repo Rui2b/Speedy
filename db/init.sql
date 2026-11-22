@@ -1,18 +1,18 @@
 -- ---------------------------------------------------------------------------
--- Speedy 持久化存档表结构
+-- Speedy persistence schema
 --
--- 设计原则(严格按方案):
---   只存"存档"数据:账号、皮肤、宝石总数、宠物、孵化进度。
---   在线位置/速度/临时状态一律放服务器内存,绝不入库。
+-- Save data only: accounts, skins, gem totals, pets and hatch progress.
+-- Live positions, velocities and temporary state stay in server memory and are
+-- never written here.
 --
--- 幂等:全部使用 IF NOT EXISTS,可重复执行。
+-- Idempotent: every statement uses IF NOT EXISTS, so it is safe to re-run.
 -- ---------------------------------------------------------------------------
 
--- --- 用户账号 -------------------------------------------------------------
+-- --- Accounts -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
     uid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username         VARCHAR(20) NOT NULL,
-    -- 用户名唯一,不区分大小写
+    -- Case-insensitive uniqueness
     username_lower   VARCHAR(20) NOT NULL UNIQUE,
     password_hash    TEXT NOT NULL,
     display_name     VARCHAR(24) NOT NULL,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT users_username_len CHECK (char_length(username) BETWEEN 3 AND 20)
 );
 
--- --- 玩家资源(一行一玩家,与 users 一对一)-------------------------------
+-- --- Player resources (one row per player) --------------------------------
 CREATE TABLE IF NOT EXISTS player_inventory (
     uid              UUID PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
     gems             INTEGER NOT NULL DEFAULT 0 CHECK (gems >= 0),
@@ -34,9 +34,9 @@ CREATE TABLE IF NOT EXISTS player_inventory (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- --- 宠物 -----------------------------------------------------------------
--- owner_uid 为 NULL 表示野生宠物。
--- hatch_progress 持久化,玩家下线后不丢孵化进度。
+-- --- Pets -----------------------------------------------------------------
+-- A NULL owner_uid means the pet is wild.
+-- hatch_progress is persisted so progress survives a disconnect.
 CREATE TABLE IF NOT EXISTS pets (
     pet_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_uid        UUID REFERENCES users(uid) ON DELETE SET NULL,
@@ -46,14 +46,15 @@ CREATE TABLE IF NOT EXISTS pets (
     is_hatched       BOOLEAN NOT NULL DEFAULT false,
     stolen_count     INTEGER NOT NULL DEFAULT 0 CHECK (stolen_count >= 0),
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- 抢夺后原主人失去所有权的保护期
+    -- Protection window after a steal
     last_stolen_at   TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS pets_owner_idx ON pets(owner_uid) WHERE owner_uid IS NOT NULL;
 
--- --- 会话审计(可选,几行/分钟,不涉及 tick 写入)------------------------
--- 用于排查 token 复用与多端踢线,单次登录/下线写一行。
+-- --- Session audit (optional) ---------------------------------------------
+-- A few rows per minute at most. Written on connect and disconnect only, so it
+-- never touches the tick loop. Useful for spotting token reuse and double login.
 CREATE TABLE IF NOT EXISTS session_audit (
     id               BIGSERIAL PRIMARY KEY,
     uid              UUID NOT NULL REFERENCES users(uid) ON DELETE CASCADE,

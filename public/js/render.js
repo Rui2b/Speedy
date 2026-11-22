@@ -1,8 +1,8 @@
 /**
- * Three.js 场景与渲染。
+ * Three.js scene and rendering.
  *
- * 客户端只做:渲染、插值平滑、本地预测收敛。
- * 不做物理、不做资源判定。
+ * The client only renders, interpolates and converges to the authoritative
+ * position. It never simulates physics or decides who owns a gem.
  */
 import * as THREE from '/vendor/three/three.module.js';
 import { DEFAULT_SKIN, MAP, PALETTE, SIZES, SKINS } from './assets.js';
@@ -26,31 +26,31 @@ export class GameView {
     this.renderer.setClearColor(PALETTE.sky, 1);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(PALETTE.fog, 46, 96);
+    this.scene.fog = new THREE.Fog(PALETTE.fog, 52, 108);
 
-    this.camera = new THREE.PerspectiveCamera(52, 1, 0.1, 240);
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 260);
     this.camera.position.set(0, MAP.camera.height, MAP.camera.distance);
     this.camera.lookAt(0, 0, 0);
 
-    /** @type {Map<string, object>} uid -> { group, buffer, target, ... } */
+    /** @type {Map<string, object>} uid -> { group, buffer, facing, skinId } */
     this.otherPlayers = new Map();
-    /** @type {Map<string, THREE.Object3D>} gemId -> mesh */
+    /** @type {Map<string, THREE.Object3D>} gemId -> group */
     this.gemMeshes = new Map();
-    /** @type {Map<string, object>} petId -> { group, target, ... } */
+    /** @type {Map<string, object>} petId -> { group, target, hatchProgress } */
     this.petMeshes = new Map();
     /** @type {Map<string, {displayName:string, skinId:string}>} */
     this.roster = new Map();
 
     this.selfUid = null;
     this.selfGroup = null;
-    this.selfRing = null;
-    /** 本地预测位置(立即响应输入) */
     this.predicted = new THREE.Vector3(0, 0, 0);
-    /** 服务器权威位置 */
     this.authoritative = new THREE.Vector3(0, 0, 0);
-    /** 服务器下发的速度,用于本地预测 */
     this.authoritativeVel = new THREE.Vector3(0, 0, 0);
     this.facing = 0;
+
+    /** Sign-in screen: slow orbit instead of following the player. */
+    this.attractMode = true;
+    this.attractAngle = Math.PI * 0.25;
 
     this.clock = new THREE.Clock();
     this.running = false;
@@ -68,187 +68,273 @@ export class GameView {
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
+    // The canvas has no layout size yet on first paint; measure after it does.
     this.resize();
+    requestAnimationFrame(() => this.resize());
+    if (typeof ResizeObserver !== 'undefined') {
+      this._observer = new ResizeObserver(() => this.resize());
+      this._observer.observe(canvas);
+    }
   }
 
   /* ------------------------------------------------------------------ *
-   * 环境
+   * Environment
    * ------------------------------------------------------------------ */
   buildEnvironment() {
-    const hemi = new THREE.HemisphereLight(0xbcd7ff, 0x0a1220, MAP.ambientIntensity);
+    const hemi = new THREE.HemisphereLight(0x9fb2c9, 0x120f0c, MAP.ambientIntensity);
     this.scene.add(hemi);
 
-    const dir = new THREE.DirectionalLight(0xffffff, MAP.directionalIntensity);
-    dir.position.set(18, 30, 14);
-    this.scene.add(dir);
+    // Low dusk key light from one side, like a floodlight
+    const key = new THREE.DirectionalLight(0xffe6bd, MAP.directionalIntensity);
+    key.position.set(-26, 22, 18);
+    this.scene.add(key);
 
-    const groundGeo = new THREE.CircleGeometry(MAP.worldRadius, 72);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.ground,
-      roughness: 0.95,
-      metalness: 0.05,
-    });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
+    const rim = new THREE.DirectionalLight(0x6f8bb0, 0.5);
+    rim.position.set(24, 10, -22);
+    this.scene.add(rim);
+
+    // Infill surface
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(MAP.worldRadius + 4, 96),
+      new THREE.MeshStandardMaterial({
+        color: PALETTE.ground,
+        roughness: 0.98,
+        metalness: 0,
+      }),
+    );
     ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = false;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(
-      MAP.worldRadius * 2,
-      MAP.gridDivisions,
-      PALETTE.grid,
-      PALETTE.grid,
+    // The track itself: a slightly warmer ring of worn surfacing between the
+    // inner infield and the outer boundary.
+    const trackInner = MAP.laneSpacing;
+    const trackOuter = MAP.worldRadius - 0.6;
+    const track = new THREE.Mesh(
+      new THREE.RingGeometry(trackInner, trackOuter, 128),
+      new THREE.MeshStandardMaterial({
+        color: PALETTE.track,
+        roughness: 0.95,
+        metalness: 0.02,
+      }),
     );
-    grid.material.opacity = 0.22;
-    grid.material.transparent = true;
-    grid.position.y = 0.02;
-    this.scene.add(grid);
+    track.rotation.x = -Math.PI / 2;
+    track.position.y = 0.006;
+    this.scene.add(track);
 
-    // 场地边界:一圈低矮环,提示可行走范围
-    const ringGeo = new THREE.RingGeometry(MAP.worldRadius - MAP.wallThickness, MAP.worldRadius, 96);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: PALETTE.groundEdge,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.03;
-    this.scene.add(ring);
-
-    const starGeo = new THREE.BufferGeometry();
-    const starCount = 220;
-    const positions = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i += 1) {
-      const radius = 60 + Math.random() * 60;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.random() * Math.PI * 0.42;
-      positions[i * 3] = Math.cos(theta) * Math.cos(phi) * radius;
-      positions[i * 3 + 1] = 10 + Math.sin(phi) * radius * 0.72;
-      positions[i * 3 + 2] = Math.sin(theta) * Math.cos(phi) * radius;
+    // Lane lines: concentric rings, one in lane paint marks the inner lane
+    const laneGroup = new THREE.Group();
+    for (let i = 1; i <= MAP.laneCount; i += 1) {
+      const radius = i * MAP.laneSpacing;
+      if (radius > MAP.worldRadius) break;
+      const isAccent = i === 2;
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(radius - MAP.laneWidth / 2, radius + MAP.laneWidth / 2, 128),
+        new THREE.MeshBasicMaterial({
+          color: isAccent ? PALETTE.laneAccent : PALETTE.lane,
+          // Quiet enough to stay behind the gems and players
+          transparent: true,
+          opacity: isAccent ? 0.24 : 0.8,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.012 + i * 0.0006;
+      laneGroup.add(ring);
     }
-    starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const stars = new THREE.Points(
-      starGeo,
-      new THREE.PointsMaterial({ color: 0xa9c4ea, size: 0.6, sizeAttenuation: true, transparent: true, opacity: 0.7 }),
+
+    // Start line: a short dash across the lanes, like a stagger mark
+    for (let i = 1; i < MAP.laneCount; i += 1) {
+      const r = (i + 0.5) * MAP.laneSpacing;
+      if (r > MAP.worldRadius) break;
+      const dash = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.34, MAP.laneSpacing * 0.72),
+        new THREE.MeshBasicMaterial({
+          color: PALETTE.chalk,
+          transparent: true,
+          opacity: 0.55,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      dash.rotation.x = -Math.PI / 2;
+      dash.position.set(r, 0.016, 0);
+      laneGroup.add(dash);
+    }
+
+    // Chalk boundary at the outer edge
+    const boundary = new THREE.Mesh(
+      new THREE.RingGeometry(MAP.worldRadius - 0.42, MAP.worldRadius - 0.12, 128),
+      new THREE.MeshBasicMaterial({
+        color: PALETTE.chalk,
+        transparent: true,
+        opacity: 0.85,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
     );
-    this.scene.add(stars);
-    this.stars = stars;
+    boundary.rotation.x = -Math.PI / 2;
+    boundary.position.y = 0.03;
+    laneGroup.add(boundary);
+
+    this.scene.add(laneGroup);
+
+    // Radial tick marks, like lane dividers near the outer edge
+    const ticks = new THREE.Group();
+    for (let i = 0; i < 32; i += 1) {
+      const angle = (i / 32) * Math.PI * 2;
+      const tick = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.1, 2.2),
+        new THREE.MeshBasicMaterial({
+          color: PALETTE.chalk,
+          transparent: true,
+          opacity: 0.3,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      tick.rotation.x = -Math.PI / 2;
+      tick.rotation.z = -angle;
+      const r = MAP.worldRadius - 2.2;
+      tick.position.set(Math.cos(angle) * r, 0.014, Math.sin(angle) * r);
+      ticks.add(tick);
+    }
+    this.scene.add(ticks);
+
+    // Distant floodlights: warm pools of light at the field edge, no fixtures in
+    // frame. They light the outer lane without adding clutter.
+    for (let i = 0; i < 4; i += 1) {
+      const angle = Math.PI / 4 + (i * Math.PI) / 2;
+      const px = Math.cos(angle) * (MAP.worldRadius + 5);
+      const pz = Math.sin(angle) * (MAP.worldRadius + 5);
+      const glow = new THREE.PointLight(0xffd39b, 12, 26, 2);
+      glow.position.set(px, 4.5, pz);
+      this.scene.add(glow);
+    }
   }
 
   /* ------------------------------------------------------------------ *
-   * 模型工厂(皮肤/贴图替换入口)
+   * Mesh factories (the place to swap art)
    * ------------------------------------------------------------------ */
   createPlayerMesh({ skinId, isSelf }) {
     const skin = SKINS[skinId] ?? SKINS[DEFAULT_SKIN];
     const group = new THREE.Group();
 
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: skin.body,
-      roughness: 0.6,
-      metalness: 0.1,
-      map: skin.map ?? null,
-    });
     const body = new THREE.Mesh(
-      new THREE.CapsuleGeometry(SIZES.playerBody.x / 2, SIZES.playerBody.y, 6, 14),
-      bodyMat,
+      new THREE.CapsuleGeometry(SIZES.playerBody.x / 2, SIZES.playerBody.y, 6, 16),
+      new THREE.MeshStandardMaterial({
+        color: skin.body,
+        roughness: 0.72,
+        metalness: 0.04,
+        map: skin.map ?? null,
+      }),
     );
     body.position.y = SIZES.playerBody.y / 2 + 0.42;
     group.add(body);
 
     const head = new THREE.Mesh(
-      new THREE.SphereGeometry(SIZES.playerHead / 2, 18, 14),
-      new THREE.MeshStandardMaterial({ color: skin.accent, roughness: 0.5 }),
+      new THREE.SphereGeometry(SIZES.playerHead / 2, 20, 16),
+      new THREE.MeshStandardMaterial({ color: skin.accent, roughness: 0.6 }),
     );
     head.position.y = body.position.y + SIZES.playerBody.y / 2 + SIZES.playerHead * 0.42;
     group.add(head);
 
-    // 朝向指示:一个小鼻尖,方便看出面朝方向
+    // A small marker so the facing direction reads at a glance
     const nose = new THREE.Mesh(
-      new THREE.ConeGeometry(SIZES.playerHead * 0.22, SIZES.playerHead * 0.4, 10),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
+      new THREE.ConeGeometry(SIZES.playerHead * 0.2, SIZES.playerHead * 0.36, 12),
+      new THREE.MeshStandardMaterial({ color: 0xf6f1e6, roughness: 0.5 }),
     );
     nose.rotation.x = Math.PI / 2;
     nose.position.set(0, head.position.y, SIZES.playerHead * 0.5);
     group.add(nose);
 
     const ring = new THREE.Mesh(
-      new THREE.RingGeometry(SIZES.ringInner, SIZES.ringOuter, 32),
+      new THREE.RingGeometry(SIZES.ringInner, SIZES.ringOuter, 40),
       new THREE.MeshBasicMaterial({
         color: isSelf ? PALETTE.selfRing : PALETTE.otherRing,
         transparent: true,
-        opacity: isSelf ? 0.85 : 0.5,
+        opacity: isSelf ? 0.9 : 0.45,
         side: THREE.DoubleSide,
+        depthWrite: false,
       }),
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.04;
     group.add(ring);
 
-    group.userData.ring = ring;
     group.userData.skinId = skinId;
     return group;
   }
 
   createGemMesh() {
-    const geo = new THREE.OctahedronGeometry(SIZES.gem, 0);
-    const mat = new THREE.MeshStandardMaterial({
-      color: PALETTE.gem,
-      emissive: PALETTE.gemGlow,
-      emissiveIntensity: 1.15,
-      roughness: 0.15,
-      metalness: 0.5,
-      flatShading: true,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.y = SIZES.gem + 0.35;
     const group = new THREE.Group();
-    group.add(mesh);
+    const gem = new THREE.Mesh(
+      new THREE.OctahedronGeometry(SIZES.gem, 0),
+      new THREE.MeshStandardMaterial({
+        color: PALETTE.gem,
+        emissive: PALETTE.gemGlow,
+        // Gems read as small warm objects, not light sources. The player keeps
+        // the brightest surface in the scene.
+        emissiveIntensity: 0.22,
+        roughness: 0.35,
+        metalness: 0.15,
+        flatShading: true,
+      }),
+    );
+    gem.position.y = SIZES.gem + 0.32;
+    group.add(gem);
 
-    // 地面光斑,提示位置
     const halo = new THREE.Mesh(
-      new THREE.CircleGeometry(SIZES.gem * 1.5, 20),
+      new THREE.CircleGeometry(SIZES.gem * 1.5, 24),
       new THREE.MeshBasicMaterial({
         color: PALETTE.gemGlow,
         transparent: true,
-        opacity: 0.2,
+        opacity: 0.07,
         side: THREE.DoubleSide,
+        depthWrite: false,
       }),
     );
     halo.rotation.x = -Math.PI / 2;
     halo.position.y = 0.05;
     group.add(halo);
 
-    group.userData.spin = mesh;
+    group.userData.spin = gem;
     return group;
   }
 
   createPetMesh() {
     const group = new THREE.Group();
     const body = new THREE.Mesh(
-      new THREE.SphereGeometry(SIZES.pet / 2, 18, 14),
+      new THREE.SphereGeometry(SIZES.pet / 2, 20, 16),
       new THREE.MeshStandardMaterial({
         color: PALETTE.pet,
-        emissive: PALETTE.pet,
-        emissiveIntensity: 0.28,
-        roughness: 0.45,
+        roughness: 0.68,
+        metalness: 0.02,
       }),
     );
-    body.position.y = SIZES.pet / 2 + 0.28;
+    body.position.y = SIZES.pet / 2 + 0.26;
     group.add(body);
 
-    const eyeGeo = new THREE.SphereGeometry(SIZES.pet * 0.09, 8, 8);
-    const eyeMat = new THREE.MeshBasicMaterial({ color: 0x0b1120 });
+    const eyeGeo = new THREE.SphereGeometry(SIZES.pet * 0.075, 8, 8);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0x17140f });
     for (const sign of [-1, 1]) {
       const eye = new THREE.Mesh(eyeGeo, eyeMat);
-      eye.position.set(sign * SIZES.pet * 0.16, body.position.y + SIZES.pet * 0.12, SIZES.pet * 0.42);
+      eye.position.set(
+        sign * SIZES.pet * 0.15,
+        body.position.y + SIZES.pet * 0.1,
+        SIZES.pet * 0.43,
+      );
       group.add(eye);
     }
 
     const halo = new THREE.Mesh(
-      new THREE.CircleGeometry(SIZES.pet * 1.4, 20),
-      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.16, side: THREE.DoubleSide }),
+      new THREE.CircleGeometry(SIZES.pet * 1.3, 24),
+      new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.12,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
     );
     halo.rotation.x = -Math.PI / 2;
     halo.position.y = 0.05;
@@ -260,7 +346,7 @@ export class GameView {
   }
 
   /* ------------------------------------------------------------------ *
-   * 状态接入
+   * State intake
    * ------------------------------------------------------------------ */
   setSelf(uid) {
     this.selfUid = uid;
@@ -268,6 +354,7 @@ export class GameView {
 
   applyWelcome(msg) {
     this.setSelf(msg.uid);
+    this.attractMode = false;
     this.selfGroup = this.rebuildSelfGroup(msg.skinId);
     this.selfGroup.visible = true;
 
@@ -288,20 +375,16 @@ export class GameView {
   rebuildSelfGroup(skinId) {
     const old = this.selfGroup;
     const fresh = this.createPlayerMesh({ skinId, isSelf: true });
-    if (old) {
-      old.removeFromParent();
-    }
+    if (old) old.removeFromParent();
     fresh.position.copy(this.predicted);
     this.scene.add(fresh);
     return fresh;
   }
 
-  /** 服务器上行下发快照 → 更新插值缓冲 */
   applySnapshot(msg) {
     const now = performance.now();
     this.lastSnapshotTick = msg.tick;
 
-    // 远端玩家
     const seen = new Set();
     for (const p of msg.players ?? []) {
       seen.add(p.uid);
@@ -316,13 +399,11 @@ export class GameView {
         entry = {
           group,
           buffer: new SnapshotBuffer(),
-          lastPos: new THREE.Vector3(p.pos.x, p.pos.y, p.pos.z),
           facing: 0,
           skinId: p.skinId,
         };
         this.otherPlayers.set(p.uid, entry);
       } else if (p.skinId && p.skinId !== entry.skinId) {
-        // 皮肤变化:重建模型
         entry.group.removeFromParent();
         const group = this.createPlayerMesh({ skinId: p.skinId, isSelf: false });
         group.position.copy(entry.group.position);
@@ -339,7 +420,6 @@ export class GameView {
       }
     }
 
-    // 宝石
     const seenGems = new Set();
     for (const g of msg.gems ?? []) {
       seenGems.add(g.gemId);
@@ -363,7 +443,6 @@ export class GameView {
       }
     }
 
-    // 宠物
     const seenPets = new Set();
     for (const p of msg.pets ?? []) {
       seenPets.add(p.petId);
@@ -372,13 +451,12 @@ export class GameView {
         const group = this.createPetMesh();
         group.position.set(p.pos.x, 0, p.pos.z);
         this.petsGroup.add(group);
-        entry = { group, target: { x: p.pos.x, z: p.pos.z }, hatchProgress: 0, owned: false };
+        entry = { group, target: { x: p.pos.x, z: p.pos.z }, hatchProgress: 0 };
         this.petMeshes.set(p.petId, entry);
       }
       entry.target = { x: p.pos.x, z: p.pos.z };
       entry.hatchProgress = p.hatchProgress ?? 0;
-      entry.owned = Boolean(p.ownerUid);
-      this.updatePetAppearance(entry, p.ownerUid === this.selfUid);
+      this.updatePetAppearance(entry, p.ownerUid === this.selfUid, Boolean(p.ownerUid));
     }
     for (const [id, entry] of this.petMeshes) {
       if (!seenPets.has(id)) {
@@ -388,26 +466,26 @@ export class GameView {
     }
   }
 
-  updatePetAppearance(entry, isMine) {
+  updatePetAppearance(entry, isMine, isOwned) {
     const body = entry.group.userData.body;
     const halo = entry.group.userData.halo;
     if (!body) return;
     const hatched = entry.hatchProgress >= 100;
-    const color = isMine ? (hatched ? PALETTE.petHatched : 0x60a5fa) : PALETTE.pet;
+    let color = PALETTE.pet;
+    if (isMine) color = hatched ? PALETTE.petHatched : PALETTE.petOwned;
+    else if (isOwned) color = PALETTE.petOwned;
     body.material.color.setHex(color);
-    body.material.emissive.setHex(color);
     halo.material.color.setHex(color);
-    halo.material.opacity = isMine ? 0.3 : 0.16;
+    halo.material.opacity = isMine ? 0.24 : 0.12;
   }
 
-  /** 自己的权威状态 → 纠正预测 */
   applySelfState(msg) {
     this.authoritative.set(msg.pos.x, msg.pos.y, msg.pos.z);
     this.authoritativeVel.set(msg.vel.x, msg.vel.y, msg.vel.z);
   }
 
   /* ------------------------------------------------------------------ *
-   * 每帧
+   * Frame
    * ------------------------------------------------------------------ */
   start() {
     if (this.running) return;
@@ -434,43 +512,35 @@ export class GameView {
     this.updateOthers(renderTime);
     this.updateGems(dt);
     this.updatePets(dt);
-    this.updateCamera(dt);
+    if (this.attractMode) this.updateAttractCamera(dt);
+    else this.updateCamera(dt);
 
     this.renderer.render(this.scene, this.camera);
   }
 
   updateSelf(dt) {
     if (!this.selfGroup) return;
-    // 预测:本地立即响应当前输入(仅视觉),再向服务器权威坐标收敛
-    const factor = convergeFactor(14, dt);
-    this.predicted.lerp(this.authoritative, factor);
-
+    this.predicted.lerp(this.authoritative, convergeFactor(14, dt));
     this.selfGroup.position.set(this.predicted.x, this.predicted.y, this.predicted.z);
 
     const vx = this.authoritativeVel.x;
     const vz = this.authoritativeVel.z;
     if (Math.hypot(vx, vz) > 0.25) {
-      const target = Math.atan2(vx, vz);
-      this.facing = lerpAngle(this.facing, target, convergeFactor(12, dt));
+      this.facing = lerpAngle(this.facing, Math.atan2(vx, vz), convergeFactor(12, dt));
     }
     this.selfGroup.rotation.y = this.facing;
-
-    // 轻微起伏,让站着的角色不显得僵死
-    const bob = Math.sin(performance.now() / 260) * 0.02;
-    this.selfGroup.position.y += bob;
   }
 
-  /** 本地预测:网络层每帧调用,把输入转成即时视觉位移(不含碰撞) */
+  /** Local prediction: instant visual response, corrected by the server. */
   predictMotion(dt, input) {
     if (!this.selfGroup) return;
-    const speed = MAP.predictedSpeed ?? 6;
+    const speed = MAP.predictedSpeed;
     const len = Math.hypot(input.moveX, input.moveZ);
     if (len < 0.01) return;
     const nx = input.moveX / Math.max(1, len);
     const nz = input.moveZ / Math.max(1, len);
     this.predicted.x += nx * speed * dt;
     this.predicted.z += nz * speed * dt;
-    // 本地预测不能跑出世界
     const dist = Math.hypot(this.predicted.x, this.predicted.z);
     if (dist > MAP.worldRadius) {
       const scale = MAP.worldRadius / dist;
@@ -493,8 +563,7 @@ export class GameView {
       const dz = nz - group.position.z;
       group.position.set(nx, ny, nz);
       if (Math.hypot(dx, dz) > 0.02) {
-        const target = Math.atan2(dx, dz);
-        entry.facing = lerpAngle(entry.facing, target, 0.28);
+        entry.facing = lerpAngle(entry.facing, Math.atan2(dx, dz), 0.28);
       }
       group.rotation.y = entry.facing;
     }
@@ -511,8 +580,8 @@ export class GameView {
       }
       const spin = mesh.userData.spin;
       if (spin) {
-        spin.rotation.y += dt * 1.7;
-        spin.position.y = SIZES.gem + 0.35 + Math.sin(t * 2 + mesh.position.x) * 0.11;
+        spin.rotation.y += dt * 1.5;
+        spin.position.y = SIZES.gem + 0.32 + Math.sin(t * 2 + mesh.position.x) * 0.1;
       }
     }
   }
@@ -524,8 +593,22 @@ export class GameView {
       entry.group.position.x += (entry.target.x - entry.group.position.x) * k;
       entry.group.position.z += (entry.target.z - entry.group.position.z) * k;
       const body = entry.group.userData.body;
-      if (body) body.position.y = SIZES.pet / 2 + 0.28 + Math.sin(t * 3 + entry.target.x) * 0.06;
+      if (body) body.position.y = SIZES.pet / 2 + 0.26 + Math.sin(t * 3 + entry.target.x) * 0.05;
     }
+  }
+
+  /** Slow orbit while the sign-in panel is open. */
+  updateAttractCamera(dt) {
+    this.attractAngle += dt * MAP.attract.speed;
+    const r = MAP.attract.radius;
+    const targetX = Math.sin(this.attractAngle) * r;
+    const targetZ = Math.cos(this.attractAngle) * r;
+    const k = convergeFactor(1.6, dt);
+    this.camera.position.x += (targetX - this.camera.position.x) * k;
+    this.camera.position.z += (targetZ - this.camera.position.z) * k;
+    this.camera.position.y += (MAP.attract.height - this.camera.position.y) * k;
+    const focus = MAP.attract.focus;
+    this.camera.lookAt(focus.x, focus.y, focus.z);
   }
 
   updateCamera(dt) {
@@ -542,8 +625,13 @@ export class GameView {
   }
 
   resize() {
-    const width = this.canvas.clientWidth || window.innerWidth;
-    const height = this.canvas.clientHeight || window.innerHeight;
+    const parent = this.canvas.parentElement ?? document.body;
+    const width = Math.max(1, parent.clientWidth || window.innerWidth);
+    const height = Math.max(1, parent.clientHeight || window.innerHeight);
+    const current = this.renderer.getSize(new THREE.Vector2());
+    if (current.x === width && current.y === height && this.camera.aspect === width / height) {
+      return;
+    }
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
@@ -552,6 +640,7 @@ export class GameView {
   dispose() {
     this.stop();
     window.removeEventListener('resize', this._onResize);
+    this._observer?.disconnect();
     this.renderer.dispose();
   }
 }

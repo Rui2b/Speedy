@@ -1,154 +1,143 @@
-# 运维坑清单（Oracle Cloud Always Free + Speedy）
+# Operations notes
 
-实战踩坑记录与应对办法。按"会不会让线上挂掉"排序。
+Field notes from running Speedy on Oracle Cloud Always Free, ordered by how
+badly each item can break production.
 
 ---
 
-## 一、Oracle Free Tier 硬限制
+## 1. Always Free limits
 
-### 1.1 实例规格
+### 1.1 Instance shapes
 
-Always Free 的 ARM（Ampere A1）是 4 OCPU / 24 GB，但**总量**受限：
+Ampere A1 gives 4 OCPU and 24 GB total per tenancy across all A1 instances. Go
+over that and OCI reclaims capacity, which means the instance is stopped and
+deleted, not throttled.
 
-- 每个 tenancy 最多 **4 OCPU + 24 GB 内存** 的 A1 实例，所有实例加总
-- 若开了多个 A1 实例，超出部分会被 OCI 直接回收（不是降级，是关机删除）
+The AMD shape, `VM.Standard.E2.1.Micro`, is 1/8 OCPU with 1 GB of memory, two
+per account. The instance this project was measured on is 2 cores and 956 MB:
+enough for 30 concurrent players, not enough for anything else.
 
-AMD 版本是 `VM.Standard.E2.1.Micro`：**1/8 OCPU、1 GB 内存**，每月 2 个。
-本项目实测环境就是 2 核 956 MB，**够跑 30 人在线，但不要再装别的服务**。
+Keep the game on its own small instance and leave the panel and database
+elsewhere if you can.
 
-**建议**：游戏服单独一台小机器，别和面板/数据库抢内存。
+### 1.2 Bandwidth
 
-### 1.2 带宽
+Outbound traffic is free up to 10 TB per month, then billed per GB. Inbound is
+free.
 
-```bash
-# 查看当月出站流量（OCI 控制台 → Billing → Cost Analysis）
-```
+Bandwidth estimate at 30 concurrent players:
 
-- **出站流量每月 10 TB 免费**，超出按 $0.0085/GB 计费
-- 入站流量不计费
-
-本项目的带宽估算（30 人同时在线）：
-
-| 项目 | 单包大小 | 频率 | 每人每秒 | 30 人合计 |
+| Traffic | Packet | Rate | Per player | 30 players |
 | --- | --- | --- | --- | --- |
-| 上行（输入） | ~150 B | 20 Hz | 3 KB/s | 90 KB/s |
-| 下行（快照） | ~2—4 KB | 10 Hz | 25 KB/s | 750 KB/s |
-| 下行（自身状态） | ~200 B | 10 Hz | 2 KB/s | 60 KB/s |
+| Input (up) | ~150 B | 20 Hz | 3 KB/s | 90 KB/s |
+| Snapshot (down) | 2 to 4 KB | 10 Hz | 25 KB/s | 750 KB/s |
+| Self state (down) | ~200 B | 10 Hz | 2 KB/s | 60 KB/s |
 
-峰值约 **6.5 Mbps**、约 **2.9 GB/小时**。按每天开 8 小时算，一月约 700 GB，
-远低于 10 TB。但如果有人在浏览器里挂着不动一整天，会持续消耗——考虑空闲踢人。
+About 6.5 Mbps peak, roughly 2.9 GB per hour. Eight hours a day lands near
+700 GB a month, far under the cap. A browser left open and idle still consumes
+bandwidth, so consider dropping idle sessions.
 
-### 1.3 计算资源
+### 1.3 Compute
 
-- Free Tier 实例**没有 CPU 信用（burstable）保障**，长期跑满会被限速
-- 20 tick/s 的模拟在 1 GB 内存机器上 CPU 占用约 5—15%
-- **不要在游戏机上跑编译、Docker 多容器、数据库 + 游戏 + 面板**
+Free Tier instances are burstable with no CPU credit guarantee; sustained load
+gets throttled. A 20 tick/s simulation costs 5 to 15 percent of one core on a
+1 GB machine. Do not compile, run several containers, or host the database,
+game and panel together.
 
-### 1.4 公网 IP
+### 1.4 Public IP
 
-- 实例销毁重建后 **公网 IPv4 会变**
-- 但走 Cloudflare Tunnel 时**源站 IP 变化不影响服务**（Tunnel 是出站连接），
-  这是选择 Tunnel 而非直接暴露端口的一大好处
-- 如果直连（Nginx + Let's Encrypt），IP 变化后 DNS 要更新，证书续期也会短暂失败
+A rebuilt instance gets a new public IPv4. Behind a Cloudflare Tunnel this does
+not matter, because the tunnel dials out, which is one reason to prefer it over
+exposing ports. With Nginx and Let's Encrypt, an IP change needs a DNS update
+and briefly breaks certificate renewal.
 
 ---
 
-## 二、OCI 网络与断流
+## 2. Network and dropped connections
 
-### 2.1 空闲长连接被掐
+### 2.1 Idle sockets getting cut
 
-OCI 的 NAT/安全组对"看起来空闲"的 TCP 连接有超时行为（常见 5—30 分钟不等）。
+NAT gateways and security groups drop TCP connections that look idle, often
+after 5 to 30 minutes.
 
-**本项目已处理**：双向心跳，每 3 秒一次；服务器 10 秒收不到任何上行包即断连，
-客户端自动重连（最多 5 次，间隔 1 秒）。
+The server pings both ways every 3 seconds and drops a connection that sends
+nothing for 10 seconds. The client reconnects up to 5 times, one second apart.
 
-**如果你自己改代码**：千万不要去掉心跳，或把 `heartbeatIntervalMs` 调大到
-30 秒以上。
+If you change this code, do not remove the heartbeat or raise
+`heartbeatIntervalMs` past about 30 seconds.
 
-### 2.2 Tunnel 偶发重连
+### 2.2 Tunnel reconnects
 
 ```bash
-sudo journalctl -u cloudflared-speedy -n 100 --no-pager | grep -i -E "error|retry|reconnect"
+sudo journalctl -u cloudflared-speedy -n 100 --no-pager | grep -iE "error|retry|reconnect"
 ```
 
-正常现象：`Retrying connection in up to 1m4s` 这种日志偶尔出现，几秒内自愈。
-持续出现则检查：
+An occasional `Retrying connection in up to 1m4s` is normal and heals in
+seconds. If it repeats, check outbound 7844/UDP and try HTTP/2 transport:
 
 ```bash
-# 出站 7844/UDP 是否被拦（QUIC 模式）
-sudo ufw status
-# 改用 http2 传输试试
-sudo sed -i 's/^# *protocol.*//' /etc/cloudflared/speedy-game.yml
-echo 'protocol: http2' | sudo tee -a /etc/cloudflared/speedy-game.yml
+sudo tee -a /etc/cloudflared/speedy-game.yml <<'EOF'
+protocol: http2
+EOF
 sudo systemctl restart cloudflared-speedy
 ```
 
-### 2.3 Dashboard 里改了 ingress 但没生效
+### 2.3 Dashboard ingress not taking effect
 
-Remote-managed tunnel（`config_src: cloudflare`）的 ingress 只能通过 Dashboard
-或 API 改。**本地 `speedy-game.yml` 里写 ingress 不生效**，两者会各说各话。
-
-排查：
+A remote managed tunnel (`config_src: cloudflare`) reads its ingress from the
+dashboard or API. Ingress written into the local YAML is ignored, and the two
+configs then disagree.
 
 ```bash
 sudo cloudflared tunnel --config /etc/cloudflared/speedy-game.yml tunnel info speedy-game
 ```
 
-### 2.4 健康检查 falsely failed
+### 2.4 Precheck false alarm
 
-`cloudflared` 的 precheck 偶尔报 `UDP Connectivity FAIL`，但 HTTP/2 通，
-服务也正常。看最终汇总行：
+cloudflared sometimes reports `UDP Connectivity FAIL` while HTTP/2 works and
+traffic flows. Read the summary line:
 
 ```
 SUMMARY: Environment is healthy. cloudflared will use 'quic' as primary protocol.
 ```
 
-这一行是 healthy 就没问题。
+That line is the verdict.
 
 ---
 
-## 三、PostgreSQL 相关
+## 3. PostgreSQL
 
-### 3.1 Docker 里的 PG 端口暴露
+### 3.1 Exposed database port
 
-**高危**。默认 `-p 5432:5432` 会监听 `0.0.0.0`，等于把数据库开到公网。
-
-检查：
+The dangerous default. A container started with `-p 5432:5432` listens on
+`0.0.0.0`, which puts the database on the public internet.
 
 ```bash
 sudo ss -tlnp | grep 5432
-# 期望看到 127.0.0.1:5432,而不是 0.0.0.0:5432
+# want 127.0.0.1:5432, never 0.0.0.0:5432
 ```
 
-修复（1Panel 创建的容器）：
+Fix it in the panel's container settings, or as a backstop:
 
 ```bash
-# 1Panel → 容器 → 编辑 → 端口改为 127.0.0.1:5432:5432
-# 或者用 iptables 兜底
 sudo ufw deny 5432
 ```
 
-本项目 `.env` 里的 `DATABASE_URL` 用 `127.0.0.1:5432`，走本机回环即可。
+The project's `DATABASE_URL` uses loopback, so nothing else needs to change.
 
-### 3.2 容器重启后连接失败
+### 3.2 Connections failing after a container restart
 
-`pool.on('error')` 已处理，但如果 PG 容器重启，Node 侧的连接池需要重建。
+The pool logs and recovers, but a restarted database container usually needs a
+service restart:
 
 ```bash
 sudo systemctl restart speedy
 ```
 
-如果想自动化，加一个 systemd 依赖：
+The unit already declares `After=docker.service`, so a full reboot orders
+correctly.
 
-```ini
-# /etc/systemd/system/speedy.service 的 [Unit] 段
-After=docker.service
-Wants=docker.service
-```
-
-（已在 `deploy/speedy.service` 里配好）
-
-### 3.3 磁盘被日志/数据撑满
+### 3.3 Disk filling up
 
 ```bash
 df -h /
@@ -156,178 +145,154 @@ sudo docker system df
 sudo journalctl --disk-usage
 ```
 
-清理：
-
 ```bash
-# 限制 systemd 日志到 200 MB
 sudo journalctl --vacuum-size=200M
-
-# 清理不用的镜像
 sudo docker image prune -a
-
-# 清理作弊日志（保留最近 7 天）
-sudo find /opt/speedy/logs -name 'cheat.log' -size +50M -exec truncate -s 0 {} \;
+sudo truncate -s 0 /opt/speedy/logs/cheat.log   # after archiving it
 ```
 
-建议给 `journald` 设上限：
+Cap journald permanently:
 
 ```bash
 sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf
 sudo systemctl restart systemd-journald
 ```
 
-### 3.4 备份
+### 3.4 Backups
 
 ```bash
 sudo bash /opt/speedy/deploy/backup-db.sh
 ```
 
-脚本会：`docker exec pg_dump | gzip` → `/var/backups/speedy/` → 校验 gzip 完整性
-与关键表存在 → 删除 14 天前的旧备份。
-
-加定时任务：
+It dumps through `docker exec`, gzips to `/var/backups/speedy`, verifies the
+archive opens and contains the users table, then prunes anything older than 14
+days.
 
 ```bash
 sudo crontab -e
-# 每天 03:10
-10 3 * * * /usr/bin/bash /opt/speedy/deploy/backup-db.sh >> /var/log/speedy-backup.log 2>&1
+# 10 3 * * * /usr/bin/bash /opt/speedy/deploy/backup-db.sh >> /var/log/speedy-backup.log 2>&1
 ```
 
-**恢复演练一定要做一次**（不然备份等于没有）：
+Rehearse a restore once, or the backup does not exist:
 
 ```bash
-# 在测试库上验证
 gunzip -c /var/backups/speedy/speedy-20261122-031000.sql.gz | \
-  sudo docker exec -i 1Panel-postgresql-tGSS psql -U speedy -d speedy_test
+  sudo docker exec -i <container> psql -U speedy -d speedy_test
 ```
 
-### 3.5 宝石数据丢失
+### 3.5 Losing gem counts
 
-宝石走"批量落库"（5 秒一批）。如果进程被 `kill -9`，最多丢 5 秒的宝石。
-
-`SIGTERM`（`systemctl stop`/`restart` 用的就是它）会触发优雅关闭，
-`flushInventory()` 会把脏数据写完再退出。**不要用 `kill -9` 停服务。**
+Gems flush in batches every 5 seconds, so a `kill -9` loses up to 5 seconds of
+pickups. `SIGTERM`, which `systemctl stop` and `restart` send, flushes first and
+exits cleanly. Never stop the service with `kill -9`.
 
 ---
 
-## 四、Node / 进程管理
+## 4. Node and process management
 
-### 4.1 内存泄漏 / OOM
+### 4.1 Memory ceiling
 
 ```bash
-sudo systemctl status speedy     # 看 Memory 字段
-sudo journalctl -u speedy -n 100 | grep -i -E "heap|oom"
+sudo systemctl status speedy      # Memory field
+sudo journalctl -u speedy -n 100 | grep -iE "heap|oom"
 ```
 
-`deploy/speedy.service` 里设了 `MemoryMax=512M`。超过会被 systemd 杀掉并重启
-（`Restart=always`）。如果频繁触发，检查：
+The unit sets `MemoryMax=512M`; going over means systemd kills and restarts it.
+Frequent restarts mean either far more than 30 players or an attack. Check
+`/api/health` for the online count and the size of `logs/cheat.log`.
 
-- 在线人数是否远超 30（`/api/health` 的 `online`）
-- `logs/cheat.log` 是否异常巨大（有人攻击）
+### 4.2 Restart storms
 
-### 4.2 重启风暴
-
-systemd 会在 60 秒内最多重启 10 次，超过就停下来等人工介入：
+systemd allows 10 restarts in 60 seconds, then stops:
 
 ```
 StartLimitIntervalSec=60
 StartLimitBurst=10
 ```
 
-看到 `start-limit-hit` 就用：
-
 ```bash
 sudo systemctl reset-failed speedy
 sudo systemctl start speedy
 ```
 
-### 4.3 时区
+### 4.3 Time zone
 
-服务器默认 UTC。日志时间戳也是 UTC。如果想让日志显示本地时间：
+The server logs UTC in ISO 8601 with a Z suffix. To show local time in
+`journalctl`:
 
 ```bash
-sudo timedatectl set-timezone Asia/Shanghai
+sudo timedatectl set-timezone America/New_York
 sudo systemctl restart speedy
 ```
 
-（本项目日志用 ISO 8601 带 Z 后缀，明确是 UTC，不会混淆。）
-
 ---
 
-## 五、Cloudflare 相关
+## 5. Cloudflare
 
-### 5.1 Worker 的 Origin 报 1016
+### 5.1 Error 1016, origin DNS
 
-`Origin DNS error 1016` = Worker 连不上 `ORIGIN_URL` 的主机名。
+The Worker cannot resolve `ORIGIN_URL`.
 
-排查顺序：
+1. `dig +short speedy-origin.<your-domain>`
+2. Confirm the record is a CNAME to `<TunnelID>.cfargotunnel.com`
+3. `sudo systemctl status cloudflared-speedy`
+4. `curl http://127.0.0.1:8080/api/health` on the origin
 
-1. `dig +short speedy-origin.potatoedu.cc` 有没有结果
-2. 该记录是不是 CNAME 到 `<TunnelID>.cfargotunnel.com`
-3. `sudo systemctl status cloudflared-speedy` 是否 active
-4. 源站 `curl http://127.0.0.1:8080/api/health` 是否 200
-
-### 5.2 部署 Worker 时 name 报错
+### 5.2 Worker deploy rejects the name
 
 ```
 Expected "name" to be of type string, alphanumeric and lowercase with dashes only
 ```
 
-Cloudflare 要求 Worker 名**全小写**。`wrangler.jsonc` 里写 `"name": "speedy"`，
-不要写 `"Speedy"`。
+Worker names are lowercase. `"name": "speedy"`, not `"Speedy"`.
 
-### 5.3 自定义域和 Tunnel 的 DNS 冲突
+### 5.3 DNS collisions
 
-同一个子域名不要既指向 Worker 又指向 Tunnel。分工建议：
+Do not point one hostname at both a Worker and a tunnel:
 
-| 子域 | 指向 | 用途 |
+| Hostname | Target | Purpose |
 | --- | --- | --- |
-| `speedy.potatoedu.cc` | Worker | 玩家访问入口（静态 + WS 代理） |
-| `speedy-origin.potatoedu.cc` | Tunnel | 只有 Worker 用，不对玩家暴露 |
+| `speedy.<domain>` | Worker | Player entry point |
+| `speedy-origin.<domain>` | Tunnel | Worker only, never public |
 
-### 5.4 WebSocket 被 Worker 断开
+### 5.4 WebSocket dropped by the edge
 
-Workers 运行时升级时会重连 WebSocket（不是 bug）。客户端已实现自动重连，
-所以玩家只会看到短暂"正在重连"。
-
-如果频繁发生，检查 Worker 是否在转发时漏了 `Upgrade` 头。
+The Workers runtime recycles WebSocket connections during deployments. That is
+expected, and the client reconnects, so players see a brief reconnect banner. If
+it happens constantly, check that the Worker forwards the `Upgrade` header.
 
 ---
 
-## 六、安全
+## 6. Security
 
-### 6.1 必做的三件事
+### 6.1 Three things to do first
 
 ```bash
-# 1. 只开 22
 sudo ufw default deny incoming
 sudo ufw allow 22/tcp
 sudo ufw enable
 
-# 2. 禁用密码登录
 sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sudo systemctl restart ssh
 
-# 3. 数据库不暴露公网
-sudo ss -tlnp | grep 5432   # 必须是 127.0.0.1
+sudo ss -tlnp | grep 5432      # must be 127.0.0.1
 ```
 
-### 6.2 `.env` 权限
+### 6.2 File permissions
 
 ```bash
 sudo chown speedy:speedy /opt/speedy/.env
 sudo chmod 600 /opt/speedy/.env
 ```
 
-`SESSION_SECRET` 泄露 = 任何人都能伪造登录。泄露后立即换密钥并
-`systemctl restart speedy`（所有旧 token 立即失效）。
+A leaked `SESSION_SECRET` lets anyone forge a session. Rotate it and restart;
+every existing ticket becomes invalid at once.
 
-### 6.3 作弊日志里的隐私
+### 6.3 The cheat log
 
-`logs/cheat.log` 记录了 uid 与坐标。不要公开这份日志。轮转建议：
+`logs/cheat.log` contains user ids and coordinates. Do not publish it. Rotate:
 
-```bash
-# /etc/logrotate.d/speedy
+```
 /opt/speedy/logs/cheat.log {
     daily
     rotate 14
@@ -340,41 +305,42 @@ sudo chmod 600 /opt/speedy/.env
 
 ---
 
-## 七、容量与扩容
+## 7. Capacity
 
-### 7.1 建议同时在线数
+### 7.1 Concurrent players
 
-| 机器 | 建议上限 | 说明 |
+| Machine | Practical ceiling | Notes |
 | --- | --- | --- |
-| 1 GB / 1 核 | 30 | 本项目默认 `MAX_ONLINE=30` |
-| 2 GB / 2 核 | 60—80 | 需要把 `MAX_ONLINE` 调高 |
-| 24 GB A1（4 OCPU） | 300+ | 单进程会先到达 Node 事件循环瓶颈 |
+| 1 GB, 1 core | 30 | The project default |
+| 2 GB, 2 cores | 60 to 80 | Raise `MAX_ONLINE` |
+| 24 GB A1, 4 OCPU | 300+ | The event loop becomes the limit first |
 
-**单进程瓶颈**：Node 是单线程，20 tick/s 的模拟在 300 人时会有明显 GC 压力。
-要更多人就按房间分片（多个进程 + 不同端口/子域），而不是单进程硬撑。
+One Node process is single threaded. Beyond roughly 300 players, GC pressure
+shows up as tick jitter. Scale by sharding rooms across processes and ports
+rather than pushing one process harder.
 
-### 7.2 带宽先到上限怎么办
+### 7.2 Bandwidth ceiling
 
-优先降下行：
+Reduce downlink before anything else:
 
-1. 把 `BROADCAST_RATE` 从 10 降到 8（肉眼几乎无差别）
-2. 快照里去掉远处玩家（按距离裁剪）
-3. 宝石/宠物只在变化时下发（增量）
+1. `BROADCAST_RATE` from 10 to 8, which is hard to notice
+2. Cull distant players from the snapshot by radius
+3. Send gems and pets only when they change
 
-不要动 20Hz 的输入上报——那是手感的基础。
+Never lower the 20Hz input rate. That is what the controls feel like.
 
 ---
 
-## 八、排障速查表
+## 8. Quick reference
 
-| 现象 | 最可能原因 | 命令 |
+| Symptom | Likely cause | Command |
 | --- | --- | --- |
-| 页面 200 但连不上 WS | Worker 的 `ORIGIN_URL` 错 / Tunnel 挂了 | `journalctl -u cloudflared-speedy` |
-| `/api/health` 530 | Origin DNS 1016 | `dig +short speedy-origin...` |
-| 登录 500 | `.env` 缺 `SESSION_SECRET` 或 DB 不通 | `journalctl -u speedy -n 50` |
-| 玩家频繁掉线 | 心跳超时 / 网络抖动 | `grep heartbeat logs/cheat.log` |
-| 角色自己往前跑 | `INPUT_STALE_MS` 太大 | 改成 400—500 |
-| 拾取宝石没反应 | 距离 > 2.2 / 宝石已被拿走 | `grep pick_gem cheat.log` |
-| 偷宠物总失败 | 宠物是野生的 / 在冷却 / 主人离线 | `grep steal_pet cheat.log` |
-| CPU 100% | 在线人数超限 / 死循环 | `top -H -p $(pgrep -f server/index.js)` |
-| 磁盘满 | 日志 / Docker 镜像 | `du -sh /var/lib/docker /var/log` |
+| Page loads, socket never opens | Wrong `ORIGIN_URL` or tunnel down | `journalctl -u cloudflared-speedy` |
+| `/api/health` returns 530 | Origin DNS, error 1016 | `dig +short speedy-origin...` |
+| Sign in returns 500 | Missing `SESSION_SECRET` or no database | `journalctl -u speedy -n 50` |
+| Players drop repeatedly | Heartbeat or path loss | `grep heartbeat logs/cheat.log` |
+| Character slides on its own | `INPUT_STALE_MS` too high | set 400 to 500 |
+| Pickup does nothing | Beyond 2.2 m, or the gem is gone | `grep pick_gem cheat.log` |
+| Steal always fails | Wild pet, cooldown, or owner offline | `grep steal_pet cheat.log` |
+| CPU pinned | Too many players, or a loop | `top -H -p $(pgrep -f server/index.js)` |
+| Disk full | Logs or Docker images | `du -sh /var/lib/docker /var/log` |

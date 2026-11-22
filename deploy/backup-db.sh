@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PostgreSQL 备份脚本
+# PostgreSQL backup
 #
-# 在你的 PG 跑在 Docker 里的场景下(1Panel 默认),直接 docker exec pg_dump,
-# 避免依赖宿主机装 psql 客户端。
+# With PostgreSQL in Docker (the 1Panel default) this dumps straight through
+# docker exec, so no psql client is needed on the host.
 #
-# 用法:
+# Usage:
 #   sudo bash deploy/backup-db.sh
 #   sudo bash deploy/backup-db.sh /var/backups/speedy
 #
-# 建议加到 crontab(每天 03:10):
+# Suggested crontab entry, daily at 03:10:
 #   10 3 * * * /usr/bin/bash /opt/speedy/deploy/backup-db.sh >> /var/log/speedy-backup.log 2>&1
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -26,10 +26,10 @@ chmod 700 "$BACKUP_DIR"
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUT="${BACKUP_DIR}/speedy-${STAMP}.sql.gz"
 
-echo "[$(date -Is)] 开始备份 ${PG_DB} → ${OUT}"
+echo "[$(date -Is)] dumping ${PG_DB} to ${OUT}"
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-  echo "容器 ${CONTAINER} 不存在,请检查 PG_CONTAINER 环境变量" >&2
+  echo "Container ${CONTAINER} not found. Check the PG_CONTAINER variable." >&2
   exit 1
 fi
 
@@ -38,15 +38,15 @@ docker exec -i "$CONTAINER" pg_dump -U "$PG_USER" -d "$PG_DB" \
   | gzip -9 > "$OUT"
 
 SIZE=$(du -h "$OUT" | cut -f1)
-echo "[$(date -Is)] 完成,大小 ${SIZE}"
+echo "[$(date -Is)] finished, ${SIZE}"
 
-# 清理过期备份
+# Drop expired backups
 find "$BACKUP_DIR" -maxdepth 1 -name 'speedy-*.sql.gz' -mtime "+${KEEP_DAYS}" -print -delete
 
-# 简单完整性检查:gzip 能解开且包含 users 表
+# Verify the archive opens and contains the users table
 if gzip -t "$OUT" 2>/dev/null && gzip -dc "$OUT" | grep -q 'CREATE TABLE.*users'; then
-  echo "[$(date -Is)] 备份校验通过"
+  echo "[$(date -Is)] backup verified"
 else
-  echo "[$(date -Is)] 备份校验失败" >&2
+  echo "[$(date -Is)] backup verification failed" >&2
   exit 1
 fi

@@ -1,7 +1,7 @@
 /**
- * 双人玩法测试:偷宠物、冷却、权限、以及宠物被偷后的通知。
+ * Two player checks: stealing, cooldown, ownership and the stolen notification.
  *
- * 用法: node test/multiplayer.mjs [baseUrl]
+ * Usage: node test/multiplayer.mjs [baseUrl]
  */
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';
@@ -9,9 +9,15 @@ import { WebSocket } from 'ws';
 const BASE = process.argv[2] || 'http://127.0.0.1:8080';
 const WS_BASE = BASE.replace(/^http/, 'ws');
 
+const results = [];
+function check(name, ok, info) {
+  results.push({ name, ok, info });
+  console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${info ? ` - ${info}` : ''}`);
+}
+
 /**
- * 测试专用的"发宠物"辅助:直连数据库,不在服务端留任何后门。
- * 未配置 DATABASE_URL 时跳过相关用例。
+ * Test helper that grants a pet by talking to the database directly, so the
+ * server carries no test-only endpoint. Skipped when DATABASE_URL is unset.
  */
 async function grantPet(uid) {
   const url = process.env.DATABASE_URL;
@@ -29,12 +35,6 @@ async function grantPet(uid) {
   } finally {
     await client.end();
   }
-}
-
-const results = [];
-function check(name, ok, info) {
-  results.push({ name, ok, info });
-  console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${info ? ` — ${info}` : ''}`);
 }
 
 async function api(path, options = {}) {
@@ -76,17 +76,16 @@ class Peer {
       });
       cookie = login.cookie;
     }
-    if (!cookie) throw new Error(`${name} 登录失败: ${JSON.stringify(reg.body)}`);
+    if (!cookie) throw new Error(`${name} could not sign in: ${JSON.stringify(reg.body)}`);
 
     const ticket = await api('/api/ws-ticket', { headers: { Cookie: cookie } });
-    peer.uid = ticket.body.uid ?? null;
 
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(ticket.body.token)}`);
       peer.ws = ws;
       ws.on('message', (raw) => {
         const msg = JSON.parse(raw.toString());
-        // 必须回应服务器心跳,否则空闲期间会被判定为死连接
+        // Answer the server heartbeat, or an idle peer gets dropped
         if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong', t: msg.t }));
           return;
@@ -121,7 +120,7 @@ class Peer {
       };
       const timer = setTimeout(() => {
         this.waiters = this.waiters.filter((w) => w.resolve !== wrapped);
-        reject(new Error(`${this.name} 等待超时`));
+        reject(new Error(`${this.name} timed out`));
       }, timeoutMs);
       this.waiters.push({ predicate, resolve: wrapped });
     });
@@ -132,15 +131,31 @@ class Peer {
     return list[list.length - 1] ?? null;
   }
 
+  latestSelfWithVel() {
+    const list = this.queue.filter((m) => m.type === 'self_state' && m.vel);
+    return list[list.length - 1] ?? null;
+  }
+
   send(payload) {
     this.ws.send(JSON.stringify(payload));
   }
 
-  /** 朝目标点走,直到服务器权威坐标进入 radius */
-  async walkTo(target, radius = 1.6, maxMs = 15000) {
+  /** Discard queued messages matching a predicate, so a stale result cannot be
+   *  mistaken for the answer to the next request. */
+  drain(predicate) {
+    this.queue = this.queue.filter((m) => !predicate(m));
+  }
+
+  /**
+   * Walk toward a point until the authoritative position is inside radius, then
+   * send a stop input and wait for the server to settle. Without the stop the
+   * last movement packet keeps applying until input expiry, which overshoots.
+   */
+  async walkTo(target, radius = 1.6, maxMs = 20000) {
     const started = Date.now();
     let seq = 1;
     let lastSelf = null;
+    let arrived = false;
     while (Date.now() - started < maxMs) {
       const self = this.latestSelf();
       if (!self) {
@@ -150,8 +165,10 @@ class Peer {
       lastSelf = self;
       const dx = target.x - self.pos.x;
       const dz = target.z - self.pos.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist <= radius) return true;
+      if (Math.hypot(dx, dz) <= radius) {
+        arrived = true;
+        break;
+      }
       this.send({
         type: 'player_input',
         seq: seq++,
@@ -164,13 +181,31 @@ class Peer {
       });
       await new Promise((r) => setTimeout(r, 50));
     }
-    if (lastSelf) {
-      const dist = Math.hypot(target.x - lastSelf.pos.x, target.z - lastSelf.pos.z);
-      console.log(
-        `    [debug] ${this.name} 超时,剩余距离 ${dist.toFixed(2)}, 当前 ${lastSelf.pos.x.toFixed(1)},${lastSelf.pos.z.toFixed(1)} 目标 ${target.x.toFixed(1)},${target.z.toFixed(1)}`,
-      );
+
+    if (!arrived) {
+      if (lastSelf) {
+        const dist = Math.hypot(target.x - lastSelf.pos.x, target.z - lastSelf.pos.z);
+        console.log(
+          `    [debug] ${this.name} timed out ${dist.toFixed(2)} away, at ${lastSelf.pos.x.toFixed(1)},${lastSelf.pos.z.toFixed(1)} target ${target.x.toFixed(1)},${target.z.toFixed(1)}`,
+        );
+      }
+      return false;
     }
-    return false;
+
+    // Stop, then wait until the authoritative position has settled
+    for (let i = 0; i < 20; i += 1) {
+      const self = this.latestSelf();
+      this.send({
+        type: 'player_input',
+        seq: seq++,
+        input: { moveX: 0, moveZ: 0, jump: false },
+        clientPreviewPos: self ? { ...self.pos } : { x: 0, y: 0, z: 0 },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      const settled = this.latestSelfWithVel();
+      if (settled && Math.abs(settled.vel.x) < 0.2 && Math.abs(settled.vel.z) < 0.2) break;
+    }
+    return true;
   }
 
   close() {
@@ -190,38 +225,37 @@ async function main() {
 
   const a = await Peer.login(nameA, password);
   const b = await Peer.login(nameB, password);
-  check('两个玩家都已连接', Boolean(a.welcome && b.welcome), `A=${a.uid.slice(0, 8)} B=${b.uid.slice(0, 8)}`);
+  check('both players connected', Boolean(a.welcome && b.welcome), `A=${a.uid.slice(0, 8)} B=${b.uid.slice(0, 8)}`);
 
-  // 从服务器拿到一只野生宠物,先由 A 走到旁边
   const snap = await b.waitFor((m) => m.type === 'world_snapshot');
   const wildPets = snap.pets.filter((p) => p.ownerUid === null);
-  check('存在野生宠物', wildPets.length > 0, `数量=${wildPets.length}`);
+  check('wild pets exist', wildPets.length > 0, `count=${wildPets.length}`);
 
   const wild = wildPets[0];
 
-  // 野生宠物不能偷
+  // A wild pet cannot be stolen
   await a.walkTo(wild.pos, 1.8);
   a.send({ type: 'try_steal_pet', petId: wild.petId });
   const wildResult = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
-  check('野生宠物不能被偷', wildResult.ok === false && wildResult.reason === 'pet_wild', `reason=${wildResult.reason}`);
+  check('wild pets cannot be stolen', wildResult.ok === false && wildResult.reason === 'pet_wild', `reason=${wildResult.reason}`);
 
-  // 自己的宠物不能偷
+  // Your own pet cannot be stolen
   const selfSnap = await a.waitFor((m) => m.type === 'world_snapshot');
   const ownPet = selfSnap.pets.find((p) => p.ownerUid === a.uid);
   if (ownPet) {
     a.send({ type: 'try_steal_pet', petId: ownPet.petId });
     const ownResult = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
-    check('不能偷自己的宠物', ownResult.ok === false && ownResult.reason === 'own_pet', `reason=${ownResult.reason}`);
+    check('own pet cannot be stolen', ownResult.ok === false && ownResult.reason === 'own_pet', `reason=${ownResult.reason}`);
   } else {
-    check('不能偷自己的宠物', true, 'A 没有宠物,跳过');
+    check('own pet cannot be stolen', true, 'A owns no pet, skipped');
   }
 
-  // 不存在宠物
+  // Unknown pet
   a.send({ type: 'try_steal_pet', petId: 'nope-nope' });
   const missing = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
-  check('不存在的宠物被拒', missing.ok === false && missing.reason === 'pet_missing', `reason=${missing.reason}`);
+  check('unknown pet is refused', missing.ok === false && missing.reason === 'pet_missing', `reason=${missing.reason}`);
 
-  // 距离太远:用另一只野生宠物(它在别处),验证距离先于归属被判定
+  // Too far: another wild pet in a different part of the field
   const farTarget = wildPets.find(
     (p) => Math.hypot(p.pos.x - wild.pos.x, p.pos.z - wild.pos.z) > 8,
   );
@@ -229,54 +263,64 @@ async function main() {
     a.send({ type: 'try_steal_pet', petId: farTarget.petId });
     const farResult = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
     check(
-      '远距离偷宠物被拒',
+      'distant steal is refused',
       farResult.ok === false && ['too_far', 'pet_wild'].includes(farResult.reason),
       `reason=${farResult.reason}`,
     );
   }
 
-  // 完整抢夺链路:用数据库直接给某个账号发一只宠物,再由 B 抢走
+  // Full steal path: grant an owner a pet in the database, then let B take it
   const ownerReg = await api('/api/register', {
     method: 'POST',
     body: JSON.stringify({ username: `own_${suffix}`, password }),
   });
-  check('注册宠物持有者', ownerReg.status === 201, `status=${ownerReg.status}`);
+  check('owner account registered', ownerReg.status === 201, `status=${ownerReg.status}`);
 
   const granted = await grantPet(ownerReg.body.uid);
-  check('测试脚本已给持有者发放宠物', Boolean(granted), granted ? `petId=${granted.slice(0, 8)}` : '未配置 DATABASE_URL');
+  check(
+    'test helper granted a pet',
+    Boolean(granted),
+    granted ? `petId=${granted.slice(0, 8)}` : 'DATABASE_URL not set',
+  );
 
   if (granted) {
     const ownerPeer = await Peer.login(`own_${suffix}`, password);
     const snap2 = await ownerPeer.waitFor((m) => m.type === 'world_snapshot');
     const ownedPet = snap2.pets.find((p) => p.ownerUid === ownerPeer.uid);
-    check('持有者已获得宠物', Boolean(ownedPet));
+    check('owner sees the granted pet', Boolean(ownedPet));
 
     if (ownedPet) {
-      const reached = await b.walkTo(ownedPet.pos, 1.9);
-      check('B 走到了目标宠物旁', reached);
+      // Bring both players to the pet first, so the cooldown check below does
+      // not spend its window on pathfinding.
+      const aReady = await a.walkTo(ownedPet.pos, 2.2, 20000);
+      const reached = await b.walkTo(ownedPet.pos, 1.9, 20000);
+      check('B reached the target pet', reached);
 
       if (reached) {
         b.send({ type: 'try_steal_pet', petId: ownedPet.petId });
         const steal = await b.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
-        check('合法偷宠物成功', steal.ok === true, `ok=${steal.ok} reason=${steal.reason ?? '-'}`);
+        const stolenAt = Date.now();
+        check('legitimate steal succeeds', steal.ok === true, `ok=${steal.ok} reason=${steal.reason ?? '-'}`);
 
         if (steal.ok) {
           const notified = await ownerPeer
             .waitFor((m) => m.type === 'action_result' && m.action === 'pet_lost', 3000)
             .catch(() => null);
-          check('原主人收到被偷通知', notified?.reason === 'stolen', `reason=${notified?.reason ?? 'timeout'}`);
+          check('previous owner is notified', notified?.reason === 'stolen', `reason=${notified?.reason ?? 'timeout'}`);
 
           const inv = await b.waitFor((m) => m.type === 'inventory', 3000).catch(() => null);
-          check('B 的库存包含新宠物', Boolean(inv?.pets?.some((p) => p.petId === ownedPet.petId)));
+          check('B inventory contains the pet', Boolean(inv?.pets?.some((p) => p.petId === ownedPet.petId)));
 
-          // 冷却期内由原主人反抢:应当被判冷却拦住
-          await a.walkTo(ownedPet.pos, 1.9);
+          // Within the 12s window the previous owner cannot take it back. A is
+          // already standing beside the pet, so this only measures the cooldown.
+          a.drain((m) => m.type === 'action_result' && m.action === 'steal_pet');
           a.send({ type: 'try_steal_pet', petId: ownedPet.petId });
           const cd = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
+          const elapsed = Date.now() - stolenAt;
           check(
-            '冷却期内宠物无法被反抢',
+            'pet is protected during cooldown',
             cd.ok === false && cd.reason === 'cooldown',
-            `reason=${cd.reason} remaining=${cd.details?.remainingMs ?? '-'}`,
+            `reason=${cd.reason} ${elapsed}ms after the steal, A in range=${aReady}`,
           );
         }
       }
@@ -289,7 +333,7 @@ async function main() {
 
   const failed = results.filter((r) => !r.ok);
   console.log('');
-  console.log(`通过 ${results.length - failed.length}/${results.length}`);
+  console.log(`${results.length - failed.length}/${results.length} passed`);
   if (failed.length) {
     for (const f of failed) console.log(`  - ${f.name} (${f.info ?? ''})`);
     process.exitCode = 1;
@@ -297,6 +341,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('测试异常:', err.message);
+  console.error('Test crashed:', err.message);
   process.exitCode = 1;
 });

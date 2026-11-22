@@ -1,8 +1,8 @@
 /**
- * HTTP 静态资源服务。
- * - 零依赖,只服务 public/ 目录。
- * - 严格路径校验,防目录穿越。
- * - 对 .js/.mjs 加长缓存,HTML 不缓存。
+ * Static file serving.
+ * - No dependencies, only the public/ directory.
+ * - Strict path validation so no request can escape that directory.
+ * - Vendored libraries get a long cache; our own code revalidates.
  */
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -34,7 +34,7 @@ function setSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  // 允许同源加载 three.js + WebSocket;不允许内联脚本之外的第三方
+  // Same-origin scripts and WebSocket only, no third-party origins, no inline script
   res.setHeader(
     'Content-Security-Policy',
     [
@@ -53,8 +53,8 @@ function setSecurityHeaders(res) {
 }
 
 /**
- * 把 URL 映射到 public 下的真实文件。
- * @returns {string|null} 绝对路径,越界返回 null
+ * Map a URL to a real file under public/.
+ * @returns {string|null} absolute path, or null when the request tries to escape
  */
 export function resolveStaticPath(urlPath) {
   let decoded;
@@ -64,7 +64,7 @@ export function resolveStaticPath(urlPath) {
     return null;
   }
   if (decoded === '/' || decoded === '') decoded = '/index.html';
-  // 禁止空字节与反斜杠
+  // Reject null bytes and backslashes
   if (decoded.includes('\0') || decoded.includes('\\')) return null;
 
   const normalized = path.posix.normalize(decoded);
@@ -104,8 +104,8 @@ export async function serveStatic(req, res) {
 
   const ext = path.extname(target).toLowerCase();
   const isHtml = ext === '.html';
-  // 第三方库(three.js)内容稳定,可以长缓存;自己的游戏代码必须每次协商,
-  // 否则改完代码浏览器还在跑旧版本。
+  // Vendored libraries never change, so they get a long immutable cache.
+  // Our own code must revalidate, or a browser will run yesterday's build.
   const isVendored = target.startsWith(path.join(PUBLIC_DIR, 'vendor') + path.sep);
   const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
 
@@ -135,7 +135,7 @@ export async function serveStatic(req, res) {
 }
 
 /**
- * 发送 JSON 响应(供 /api/* 使用)。
+ * Send a JSON response, used by the /api routes.
  */
 export function sendJson(res, status, body, extraHeaders = {}) {
   setSecurityHeaders(res);
@@ -150,7 +150,7 @@ export function sendJson(res, status, body, extraHeaders = {}) {
 }
 
 /**
- * 读取请求体,带大小上限,防止内存耗尽。
+ * Read a JSON request body with a size cap.
  */
 export function readJsonBody(req, limitBytes = 8 * 1024) {
   return new Promise((resolve) => {

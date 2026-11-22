@@ -1,8 +1,8 @@
 /**
- * 输入采集:WASD + 空格。
+ * Input capture: WASD plus Space.
  *
- * 只负责把按键状态翻译成 moveX/moveZ/jump。
- * 具体"玩家跑到哪"由服务器决定,这里绝不计算物理。
+ * This only turns key state into moveX / moveZ / jump. Where the player
+ * actually ends up is decided by the server; nothing here simulates physics.
  */
 export class InputController {
   constructor() {
@@ -29,7 +29,7 @@ export class InputController {
     const code = event.code;
 
     if (code === 'Space') {
-      // 阻止页面滚动
+      // Stop the page from scrolling
       event.preventDefault();
       if (!event.repeat) this.jumpPending = true;
       return;
@@ -50,23 +50,27 @@ export class InputController {
   }
 
   /**
-   * 返回本帧的输入快照。
-   * 世界坐标约定:相机在 +Z 方向俯视,所以"屏幕前方"= -Z。
-   * W 键 → moveZ = -1,与服务器积分方向一致。
+   * Input snapshot for this frame.
    *
-   * 注意:jump 是"待发送"标记,由网络层在真正发包后清除。
-   * 这里不能清,否则 60fps 的采样会把一次跳跃在两次发包之间吞掉。
+   * The camera looks down from +Z, so "forward on screen" is -Z.
+   * W maps to moveZ = -1, matching the server's integration direction.
+   *
+   * jump is a pending flag, cleared by the network layer once a packet is
+   * actually sent. Clearing it here would swallow the jump, because frames
+   * run at 60fps and inputs only leave at 20Hz.
    */
   sample() {
-    const forward = (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0)
-      - (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
-    const strafe = (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0)
-      - (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0);
+    const forward =
+      (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) -
+      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
+    const strafe =
+      (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) -
+      (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0);
 
     return { moveX: strafe, moveZ: -forward, jump: this.jumpPending };
   }
 
-  /** 网络层确认跳跃已发出后调用 */
+  /** Called by the network layer once the jump has been sent. */
   consumeJump() {
     this.jumpPending = false;
   }
@@ -74,7 +78,13 @@ export class InputController {
 
 function isMoveKey(code) {
   return (
-    code === 'KeyW' || code === 'KeyA' || code === 'KeyS' || code === 'KeyD' ||
-    code === 'ArrowUp' || code === 'ArrowDown' || code === 'ArrowLeft' || code === 'ArrowRight'
+    code === 'KeyW' ||
+    code === 'KeyA' ||
+    code === 'KeyS' ||
+    code === 'KeyD' ||
+    code === 'ArrowUp' ||
+    code === 'ArrowDown' ||
+    code === 'ArrowLeft' ||
+    code === 'ArrowRight'
   );
 }

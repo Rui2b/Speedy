@@ -1,10 +1,9 @@
 /**
- * Speedy 服务入口。
+ * Speedy server entry point.
  *
- * 组成:
- *   - HTTP:静态页 + /api/login|register|session|logout|health
- *   - WebSocket:长连接游戏通道,握手时校验 session token
- *   - GameRoom:20 tick/s 权威模拟 + 10Hz 广播
+ *   - HTTP: static files and /api/login, register, session, ws-ticket, health
+ *   - WebSocket: the game channel, authenticated during the handshake
+ *   - GameRoom: 20 ticks/s authoritative simulation, 10Hz broadcast
  */
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
@@ -28,7 +27,7 @@ const store = getStore();
 const room = new GameRoom({ store });
 
 /* ------------------------------------------------------------------------- *
- * HTTP 路由
+ * HTTP routes
  * ------------------------------------------------------------------------- */
 const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
 
@@ -80,7 +79,7 @@ async function handleRegister(req, res) {
     if (err.message === 'username_taken') {
       return sendJson(res, 409, { error: 'username_taken' });
     }
-    log.error('注册失败', { message: err.message });
+    log.error('registration failed', { message: err.message });
     return sendJson(res, 500, { error: 'server_error' });
   }
 }
@@ -94,7 +93,7 @@ async function handleLogin(req, res) {
 
   try {
     const user = await store.findUserByUsername(creds.username);
-    // 用户不存在时也做一次哈希,避免通过响应时间枚举用户名
+    // Hash even when the user is missing, so timing cannot enumerate usernames
     const ok = user
       ? verifyPassword(creds.password, user.password_hash)
       : (verifyPassword(creds.password, 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA'), false);
@@ -110,7 +109,7 @@ async function handleLogin(req, res) {
       { 'Set-Cookie': cookieHeader(token, Math.floor(AUTH.sessionTtlMs / 1000)) },
     );
   } catch (err) {
-    log.error('登录失败', { message: err.message });
+    log.error('sign in failed', { message: err.message });
     return sendJson(res, 500, { error: 'server_error' });
   }
 }
@@ -132,17 +131,18 @@ async function handleSession(req, res) {
       skinId: user.equipped_skin,
     });
   } catch (err) {
-    log.error('会话查询失败', { message: err.message });
+    log.error('session lookup failed', { message: err.message });
     return sendJson(res, 500, { ok: false, error: 'server_error' });
   }
 }
 
 /**
- * 签发一个用于 WebSocket 握手的短期 token。
+ * Issue a short lived ticket for the WebSocket handshake.
  *
- * 之所以不直接让浏览器从 HttpOnly cookie 里取 token:Cloudflare Worker
- * 代理 WebSocket 时更容易处理 query 参数,同时避免跨域 cookie 的麻烦。
- * token 有效期与 session 相同,但只通过本接口向已登录用户发放。
+ * The browser cannot read the HttpOnly cookie, and a query parameter is far
+ * easier to carry through the Cloudflare Worker proxy than a cross-origin
+ * cookie. The ticket has the same lifetime as the session and is only handed
+ * to an already signed in caller.
  */
 function handleWsTicket(req, res) {
   const cookies = parseCookies(req.headers.cookie);
@@ -171,7 +171,7 @@ function handleHealth(req, res) {  sendJson(res, 200, {
 }
 
 /* ------------------------------------------------------------------------- *
- * 服务器装配
+ * Server wiring
  * ------------------------------------------------------------------------- */
 const server = http.createServer((req, res) => {
   const url = req.url || '/';
@@ -179,14 +179,14 @@ const server = http.createServer((req, res) => {
   if (url === '/api/health') return handleHealth(req, res);
   if (url === '/api/register' && req.method === 'POST') {
     handleRegister(req, res).catch((err) => {
-      log.error('注册处理异常', { message: err.message });
+      log.error('registration threw', { message: err.message });
       sendJson(res, 500, { error: 'server_error' });
     });
     return;
   }
   if (url === '/api/login' && req.method === 'POST') {
     handleLogin(req, res).catch((err) => {
-      log.error('登录处理异常', { message: err.message });
+      log.error('sign in threw', { message: err.message });
       sendJson(res, 500, { error: 'server_error' });
     });
     return;
@@ -212,8 +212,8 @@ const wss = new WebSocketServer({
 });
 
 /**
- * 握手阶段校验 token。优先 URL 参数(便于 Worker 代理场景),
- * 其次 HttpOnly Cookie。
+ * Validate the token during the handshake. The URL parameter wins, since that
+ * is what survives the Worker proxy, with the HttpOnly cookie as a fallback.
  */
 wss.on('connection', async (ws, req) => {
   let token = null;
@@ -239,7 +239,7 @@ wss.on('connection', async (ws, req) => {
   try {
     user = await store.findUserById(verdict.payload.uid);
   } catch (err) {
-    log.error('握手查询用户失败', { message: err.message });
+    log.error('handshake user lookup failed', { message: err.message });
     ws.close(1011, 'internal_error');
     return;
   }
@@ -252,7 +252,7 @@ wss.on('connection', async (ws, req) => {
   try {
     auditId = await store.startSessionAudit(user.uid, verdict.payload.jti);
   } catch (err) {
-    log.warn('会话审计创建失败', { message: err.message });
+    log.warn('could not create session audit row', { message: err.message });
   }
 
   const session = await room.attach(ws, {
@@ -265,13 +265,13 @@ wss.on('connection', async (ws, req) => {
   if (!session) return;
 
   ws.on('message', (raw) => {
-    // 任何上行消息都说明连接活着,统一刷新心跳时间,
-    // 避免因客户端只发输入包而不回 pong 被误判为死连接。
+    // Any upstream packet proves the link is alive. Refresh the heartbeat here
+    // so a client that only sends inputs is not mistaken for a dead one.
     session.lastPongAt = Date.now();
     try {
       room.handleMessage(session, raw);
     } catch (err) {
-      log.error('消息处理异常', { uid: session.uid, message: err.message });
+      log.error('message handling threw', { uid: session.uid, message: err.message });
     }
   });
 
@@ -284,16 +284,16 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('error', (err) => {
-    log.warn('连接异常', { uid: session.uid, message: err.message });
+    log.warn('connection error', { uid: session.uid, message: err.message });
   });
 });
 
 /* ------------------------------------------------------------------------- *
- * 启动 / 关闭
+ * Start and shutdown
  * ------------------------------------------------------------------------- */
 async function main() {
   if (!AUTH.secret) {
-    log.error('SESSION_SECRET 未配置,拒绝启动。请参考 .env.example 生成一个。');
+    log.error('SESSION_SECRET is not set, refusing to start. See .env.example.');
     process.exit(1);
   }
 
@@ -301,8 +301,8 @@ async function main() {
   room.start();
 
   server.listen(NETWORK.port, NETWORK.host, () => {
-    log.info(`Speedy 已启动 http://${NETWORK.host}:${NETWORK.port}`);
-    log.info(`WebSocket 路径 ${NETWORK.wsPath}`);
+    log.info(`Speedy listening on http://${NETWORK.host}:${NETWORK.port}`);
+    log.info(`WebSocket path ${NETWORK.wsPath}`);
   });
 }
 
@@ -310,10 +310,10 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  log.info(`收到 ${signal},正在关闭...`);
+  log.info(`${signal} received, shutting down`);
 
   const forceExit = setTimeout(() => {
-    log.warn('关闭超时,强制退出');
+    log.warn('shutdown timed out, forcing exit');
     process.exit(1);
   }, 12_000);
   forceExit.unref();
@@ -324,7 +324,7 @@ async function shutdown(signal) {
     await new Promise((resolve) => server.close(resolve));
     await store.close();
   } catch (err) {
-    log.error('关闭异常', { message: err.message });
+    log.error('shutdown threw', { message: err.message });
   } finally {
     clearTimeout(forceExit);
     closeLogger();
@@ -335,15 +335,15 @@ async function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (err) => {
-  log.error('未处理的 Promise 拒绝', { message: err?.message ?? String(err) });
+  log.error('unhandled promise rejection', { message: err?.message ?? String(err) });
 });
 process.on('uncaughtException', (err) => {
-  log.error('未捕获异常', { message: err?.message, stack: err?.stack });
+  log.error('uncaught exception', { message: err?.message, stack: err?.stack });
   shutdown('uncaughtException');
 });
 
 main().catch((err) => {
-  log.error('启动失败', { message: err.message, stack: err.stack });
+  log.error('startup failed', { message: err.message, stack: err.stack });
   process.exit(1);
 });
 

@@ -1,10 +1,9 @@
 /**
- * 游戏房间:把连接、世界、主循环、持久化串起来。
+ * The room: connections, world, main loop and persistence wired together.
  *
- * 时序(严格按方案):
- *   20 tick/s 权威模拟  → setInterval(50ms)
- *   10Hz 下行广播       → 每 2 个 tick 一次
- *   3s 心跳             → 独立定时器
+ *   authoritative simulation at 20 ticks/s
+ *   downlink broadcast at 10Hz, every second tick
+ *   heartbeat every 3s on its own timer
  */
 import crypto from 'node:crypto';
 import { ANTI_CHEAT, GAME, PHYSICS, RULES, TIMING } from './config.js';
@@ -24,7 +23,7 @@ import { World, createPlayerState } from './world.js';
 
 const log = createLogger('room');
 
-/** 每个连接在服务端的会话对象。 */
+/** One server side session per connection. */
 class Session {
   constructor({ ws, uid, displayName, jti, auditId }) {
     this.ws = ws;
@@ -41,7 +40,7 @@ class Session {
   send(type, payload) {
     if (this.ws.readyState !== this.ws.OPEN) return false;
     const packet = JSON.stringify({ type, ...payload });
-    // 背压保护:发送缓冲积压过多说明客户端卡住了,丢弃这一帧
+    // Backpressure: a large send buffer means a stuck client, so drop this frame
     if (this.ws.bufferedAmount > 512 * 1024) return false;
     this.ws.send(packet);
     return true;
@@ -52,7 +51,7 @@ class Session {
     try {
       this.ws.close(code, reason);
     } catch {
-      /* 已关闭 */
+      /* already closed */
     }
   }
 }
@@ -68,7 +67,7 @@ export class GameRoom {
     this.world = new World();
     /** @type {Map<import('ws').WebSocket, Session>} */
     this.sessions = new Map();
-    /** @type {Map<string, Session>} uid -> session(单端登录) */
+    /** @type {Map<string, Session>} uid -> session, one live session per account */
     this.byUid = new Map();
 
     this.tickTimer = null;
@@ -77,12 +76,12 @@ export class GameRoom {
     this.tickCount = 0;
     this.lastTickAt = 0;
     this.running = false;
-    /** 待广播的名单变更 */
+    /** Roster changed and needs one broadcast */
     this.rosterDirty = true;
   }
 
   /* ------------------------------------------------------------------ *
-   * 生命周期
+   * Lifecycle
    * ------------------------------------------------------------------ */
   start() {
     if (this.running) return;
@@ -91,16 +90,16 @@ export class GameRoom {
 
     this.tickTimer = setInterval(() => this.tick(), TIMING.tickMs);
     this.heartbeatTimer = setInterval(() => this.heartbeat(), TIMING.heartbeatIntervalMs);
-    // 宝石等库存攒批落库,5 秒一次,避免每次拾取都写 PG
+    // Flush inventory counters every 5s instead of writing on every pickup
     this.flushTimer = setInterval(() => {
       this.store.flushInventory().catch((err) => {
-        log.warn('flushInventory 失败', { message: err.message });
+        log.warn('flushInventory failed', { message: err.message });
       });
     }, 5000);
 
     this.tickTimer.unref?.();
     this.heartbeatTimer.unref?.();
-    log.info('主循环已启动', {
+    log.info('main loop started', {
       tickRate: TIMING.tickRate,
       broadcastRate: TIMING.broadcastRate,
     });
@@ -118,7 +117,7 @@ export class GameRoom {
   }
 
   /* ------------------------------------------------------------------ *
-   * 连接接入
+   * Attaching a connection
    * ------------------------------------------------------------------ */
   /**
    * @param {import('ws').WebSocket} ws
@@ -131,7 +130,7 @@ export class GameRoom {
       return null;
     }
 
-    // 单端登录:同一 uid 的新连接踢掉旧连接
+    // Single session per account: a new connection evicts the old one
     const existing = this.byUid.get(identity.uid);
     if (existing) {
       existing.close(4001, 'replaced_by_new_session');
@@ -151,7 +150,7 @@ export class GameRoom {
     try {
       profile = await this.store.loadProfile(identity.uid);
     } catch (err) {
-      log.error('加载存档失败', { uid: identity.uid, message: err.message });
+      log.error('could not load profile', { uid: identity.uid, message: err.message });
       ws.close(1011, 'profile_load_failed');
       return null;
     }
@@ -193,7 +192,7 @@ export class GameRoom {
       tick: this.world.tick,
     });
 
-    log.info('玩家上线', {
+    log.info('player joined', {
       uid: identity.uid,
       name: player.displayName,
       online: this.world.onlineCount,
@@ -202,12 +201,12 @@ export class GameRoom {
   }
 
   /**
-   * 处理一条上行消息。
+   * Handle one upstream message.
    */
   handleMessage(session, raw) {
     const parsed = parseClientMessage(raw);
     if (parsed.error) {
-      // 协议级错误不记作弊日志(可能是老版本客户端),只做节流记录
+      // Protocol errors are not cheat events; they may be an old client
       session.send(SERVER_MESSAGE.ERROR, { code: parsed.error });
       return 0;
     }
@@ -216,7 +215,7 @@ export class GameRoom {
 
     switch (parsed.type) {
       case CLIENT_MESSAGE.PING:
-        // 必须回显客户端的时间戳,否则客户端算出来的是时钟偏差而不是 RTT
+        // Echo the client timestamp, or the client measures clock skew instead of RTT
         session.send(SERVER_MESSAGE.PONG, { t: parsed.payload.t });
         return 0;
       case CLIENT_MESSAGE.PONG:
@@ -229,7 +228,7 @@ export class GameRoom {
       case CLIENT_MESSAGE.STEAL_PET:
       case CLIENT_MESSAGE.HATCH_PET:
         this.handleAction(session, parsed.type, parsed.payload, now).catch((err) => {
-          log.error('操作处理异常', { uid: session.uid, message: err.message });
+          log.error('action failed', { uid: session.uid, message: err.message });
           session.send(SERVER_MESSAGE.ACTION_RESULT, {
             action: parsed.type,
             ok: false,
@@ -243,7 +242,7 @@ export class GameRoom {
   }
 
   /* ------------------------------------------------------------------ *
-   * 输入
+   * Input
    * ------------------------------------------------------------------ */
   handleInput(session, payload, now) {
     const player = session.player;
@@ -260,7 +259,7 @@ export class GameRoom {
       return;
     }
 
-    // 丢弃重复 / 乱序 / 迟到的包
+    // Drop duplicate, out-of-order and late packets
     if (payload.seq <= player.lastSeq) {
       return;
     }
@@ -279,16 +278,16 @@ export class GameRoom {
     player.lastInputAt = now;
 
     if (payload.skinId && payload.skinId !== player.skinId) {
-      // 皮肤只允许从白名单里选,协议层已校验
+      // Skins come from a whitelist, already checked in the protocol layer
       player.skinId = payload.skinId;
       this.rosterDirty = true;
     }
 
-    // 输入包不立即回包,坐标统一由 10Hz 的 self 状态下发,省带宽
+    // No immediate reply; positions ride the 10Hz self state to save bandwidth
   }
 
   /* ------------------------------------------------------------------ *
-   * 资源操作
+   * Resource actions
    * ------------------------------------------------------------------ */
   async handleAction(session, type, payload, now) {
     const player = session.player;
@@ -335,7 +334,7 @@ export class GameRoom {
       return;
     }
 
-    // 服务器权威:先标记为已拾取,再发奖励
+    // Authoritative order: mark collected first, then grant the reward
     gem.active = false;
     gem.respawnAt = now + RULES.gemRespawnMs;
     player.gems += 1;
@@ -372,7 +371,7 @@ export class GameRoom {
       return;
     }
 
-    // 目标主人必须在线,否则世界状态和存档会不一致
+    // The current owner must be online, or world state and save would diverge
     const ownerSession = this.byUid.get(pet.ownerUid);
     if (!ownerSession || !ownerSession.player) {
       session.send(SERVER_MESSAGE.ACTION_RESULT, {
@@ -398,7 +397,7 @@ export class GameRoom {
       return;
     }
 
-    // 内存状态同步
+    // Keep memory state in sync
     previousOwner.petIds.delete(pet.petId);
     player.petIds.add(pet.petId);
     pet.ownerUid = player.uid;
@@ -426,7 +425,7 @@ export class GameRoom {
         pets: this.buildPetList(previousOwner),
       });
     }
-    log.info('宠物被偷', { from: previousOwner.uid, to: player.uid, petId: pet.petId });
+    log.info('pet stolen', { from: previousOwner.uid, to: player.uid, petId: pet.petId });
   }
 
   async doHatchPet(session, player, payload, now) {
@@ -455,7 +454,7 @@ export class GameRoom {
     try {
       await this.store.updateHatchProgress(pet.petId, player.uid, pet.hatchProgress, isHatched);
     } catch (err) {
-      log.warn('写入孵化进度失败', { petId: pet.petId, message: err.message });
+      log.warn('could not persist hatch progress', { petId: pet.petId, message: err.message });
     }
 
     session.send(SERVER_MESSAGE.ACTION_RESULT, {
@@ -469,13 +468,13 @@ export class GameRoom {
   }
 
   /* ------------------------------------------------------------------ *
-   * 主循环
+   * Main loop
    * ------------------------------------------------------------------ */
   tick() {
     const now = Date.now();
     const dtMs = now - this.lastTickAt;
     this.lastTickAt = now;
-    // dt 钳制:GC 停顿或系统挂起时不要一次积分几秒,避免穿墙
+    // Clamp dt so a GC pause or a suspended host cannot integrate several seconds at once
     const dt = Math.min(dtMs, TIMING.tickMs * 4) / 1000;
 
     this.world.step(dt, now);
@@ -506,7 +505,7 @@ export class GameRoom {
         pets: snapshot.pets,
       });
 
-      // 自己的权威状态:客户端据此纠正本地预测,也用于 HUD
+      // Authoritative self state: corrects local prediction and feeds the HUD
       session.send(SERVER_MESSAGE.SELF, {
         tick: this.world.tick,
         pos: { x: round3(player.pos.x), y: round3(player.pos.y), z: round3(player.pos.z) },
@@ -528,7 +527,7 @@ export class GameRoom {
     const now = Date.now();
     for (const session of this.sessions.values()) {
       if (now - session.lastPongAt > TIMING.heartbeatTimeoutMs) {
-        log.info('心跳超时,断开连接', { uid: session.uid });
+        log.info('heartbeat timeout, closing', { uid: session.uid });
         session.close(4000, 'heartbeat_timeout');
         this.detach(session, 'heartbeat_timeout');
         continue;
@@ -538,7 +537,7 @@ export class GameRoom {
   }
 
   /* ------------------------------------------------------------------ *
-   * 断开
+   * Detach
    * ------------------------------------------------------------------ */
   detach(session, reason = 'closed') {
     if (!this.sessions.has(session.ws)) return;
@@ -547,28 +546,28 @@ export class GameRoom {
     this.world.removePlayer(session.uid);
     this.rosterDirty = true;
 
-    // 下线时才写库(库存 + 最后在线时间)
+    // Write on disconnect only: inventory plus last seen time
     this.store.markGemPickup(session.uid, 0);
     this.store
       .flushInventory()
-      .catch((err) => log.warn('下线落库失败', { uid: session.uid, message: err.message }));
+      .catch((err) => log.warn('could not flush on disconnect', { uid: session.uid, message: err.message }));
     this.store
       .recordDisconnect(session.uid)
-      .catch((err) => log.warn('记录下线失败', { uid: session.uid, message: err.message }));
+      .catch((err) => log.warn('could not record disconnect', { uid: session.uid, message: err.message }));
     if (session.auditId) {
       this.store
         .endSessionAudit(session.auditId, reason)
-        .catch((err) => log.warn('会话审计写入失败', { message: err.message }));
+        .catch((err) => log.warn('could not write session audit', { message: err.message }));
     }
 
-    log.info('玩家下线', { uid: session.uid, reason, online: this.world.onlineCount });
+    log.info('player left', { uid: session.uid, reason, online: this.world.onlineCount });
 
-    // 立即广播一次,让其他人看到该玩家消失
+    // Broadcast right away so the others see the player disappear
     this.broadcast(Date.now());
   }
 
   /* ------------------------------------------------------------------ *
-   * 快照辅助
+   * Snapshot helpers
    * ------------------------------------------------------------------ */
   buildSelfState(player) {
     return {

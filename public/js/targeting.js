@@ -1,8 +1,8 @@
 /**
- * 目标选择:客户端只做"视觉层面"的最近目标筛选,
- * 真正的距离、冷却、归属校验全部在服务器。
+ * Target picking. The client only filters for the nearest thing on screen;
+ * distance, cooldown and ownership are all checked on the server.
  *
- * 这里直接返回 id 字符串,方便直接丢给网络层。
+ * Each helper returns an id string ready to hand to the network layer.
  */
 
 export const ACTION_KEYS = {
@@ -32,7 +32,8 @@ export function findNearestGem(gems, pos, maxDistance) {
 }
 
 /**
- * 自己的宠物优先(用于孵化),其次是别人的(用于偷)。
+ * Your own pets take priority (for hatching), then other players' pets
+ * (for stealing).
  * @returns {string|null} petId
  */
 export function findNearestPet(pets, pos, maxDistance, selfUid) {

@@ -1,20 +1,19 @@
 /**
- * 服务器权威校验 & 防作弊。
+ * Server side validation and anti-cheat.
  *
- * 这里实现方案要求的 5 项:
- *   1. 移动校验(位移阈值 + 持续漂移)
- *   2. 资源操作校验(距离 / 冷却 / 归属)
- *   3. Session Token 校验(在 auth.js,这里只做绑定检查)
- *   4. 单连接限流(每秒输入包 / 操作包上限)
- *   5. 作弊日志
+ *   1. Movement checks: per-packet displacement and sustained drift
+ *   2. Resource action checks: distance, cooldown, ownership
+ *   3. Session tokens (issued in auth.js; only binding is checked here)
+ *   4. Per-connection rate limits on input and action packets
+ *   5. Anti-cheat log
  */
 import { ANTI_CHEAT, PHYSICS, RULES, TIMING } from './config.js';
 import { logCheat } from './logger.js';
 import { planarDistance } from './world.js';
 
 /**
- * 固定窗口限流器。每 1 秒重置一次,超额直接拒绝。
- * 使用 Date.now() 的秒级窗口而不是滑动窗口,实现简单且足够。
+ * Fixed window rate limiter, reset once per second. Over the limit is a flat
+ * refusal. A one second window keyed off Date.now() is simple and enough here.
  */
 export function createRateLimiter() {
   return {
@@ -34,7 +33,7 @@ function rollWindow(rate) {
 }
 
 /**
- * 检查输入包频率。
+ * Check the input packet rate.
  * @returns {{allowed: boolean, reason?: string}}
  */
 export function checkInputRate(rate) {
@@ -55,31 +54,33 @@ export function checkActionRate(rate) {
   return { allowed: true };
 }
 
-/** 网络抖动/丢包容差(米),避免正常玩家被误判。 */
+/** Jitter and packet loss allowance in metres, so honest players are not flagged. */
 const PREVIEW_SLACK_METERS = 0.6;
-/** 瞬移需要连续多少次才计一次作弊(单帧巧合不算)。 */
+/** Consecutive hits needed before a teleport counts as one strike. */
 const DISPLACEMENT_STRIKE_AFTER = 2;
-/** 漂移需要连续多少次(约 0.6 秒)才计一次作弊,容忍网络抖动。 */
+/** Consecutive hits needed before drift counts as one strike, about 0.6s. */
 const DRIFT_STRIKE_AFTER = 12;
 
 /**
- * 移动校验。
+ * Movement validation.
  *
- * @param {object} player    服务器权威玩家状态
- * @param {object|null} preview 客户端上报的预览坐标
- * @param {number} now       当前时间戳(ms)
+ * @param {object} player server authoritative player state
+ * @param {object|null} preview position reported by the client
+ * @param {number} now current timestamp in ms
  * @returns {{ok: boolean, reason?: string, details?: object}}
  *
- * 判定分两层,两层都需要"连续多次命中"才算作弊,避免网络抖动误杀:
+ * Two layers, both requiring repeated hits before a strike, so network jitter
+ * does not punish honest players:
  *
- *   A. 瞬移检测(方案要求的"单次 tick 位移超过理论最大移动阈值"):
- *      相邻两个上报包之间,客户端自称的位置跨度不能超过
- *      maxSpeed × 实际间隔 × 容差 + 抖动容差。
- *   B. 漂移检测:客户端预览坐标与服务器权威坐标长期偏离超过 maxDrift。
+ *   A. Teleport check. Between two consecutive packets the client's claimed
+ *      position may not move further than
+ *      maxSpeed * elapsed * tolerance + jitter allowance.
+ *   B. Drift check. The reported position may not stay further than maxDrift
+ *      from the authoritative one.
  *
- * 无论哪种情况,服务器坐标都不会被改写(服务器从不信任客户端坐标),
- * 所以方案要求的"回滚到服务器权威坐标"天然成立;客户端会在下发的
- * self_state 里收到权威坐标并自行收敛。
+ * Either way the server position is never overwritten. The client never gets
+ * to move itself, so the rollback to the authoritative position is automatic:
+ * self_state carries the true position and the client converges to it.
  */
 export function validateMovement(player, preview, now) {
   if (!preview) return { ok: true };
@@ -154,7 +155,7 @@ function checkDrift(player, preview) {
 }
 
 /**
- * 累计一次可疑行为,返回是否应当断开连接。
+ * Record one suspicious event and report whether the connection should close.
  */
 export function recordStrike(player, event) {
   player.strikes += 1;
@@ -172,13 +173,15 @@ export function recordStrike(player, event) {
 }
 
 /* ------------------------------------------------------------------------- *
- * 资源操作校验
+ * Resource action validation
  * ------------------------------------------------------------------------- */
 
 /**
- * 校验一次宝石拾取。
- * 服务器自己没有"拾取请求历史",所以这里只校验距离 + 宝石是否仍然有效。
- * 宝石是否已被别人拿走由 World 的 active 标记保证。
+ * Validate a gem pickup.
+ *
+ * There is no per-player pickup history on the server, so this checks distance
+ * and whether the gem is still active. World's active flag already guarantees
+ * a gem cannot be claimed twice.
  */
 export function validateGemPickup(player, gem) {
   if (!gem || !gem.active) {
@@ -192,16 +195,17 @@ export function validateGemPickup(player, gem) {
 }
 
 /**
- * 校验一次偷宠物。
- * 规则(按此顺序判定,便于客户端给出准确提示):
- *   - 宠物必须存在
- *   - 玩家必须在 stealRadius 内
- *   - 不能偷自己的
- *   - 宠物必须有主人(野生宠物不能"偷")
- *   - 该宠物本身必须已过抢夺冷却
+ * Validate a pet steal.
  *
- * 冷却按"每只宠物"计(方案原文:12秒 per pet),而不是按玩家。
- * 这样被偷的宠物在 CD 内无法再被倒手,新主人也有保护期。
+ * Checked in this order, so the client can show an accurate reason:
+ *   - the pet exists
+ *   - the player is inside the steal radius
+ *   - the pet is not already theirs
+ *   - the pet has an owner (wild pets cannot be stolen)
+ *   - the pet itself has passed its steal cooldown
+ *
+ * The cooldown is per pet, not per player, so a freshly stolen pet cannot be
+ * flipped again immediately and its new owner gets a real protection window.
  */
 export function validatePetSteal(player, pet, now) {
   if (!pet) return { ok: false, reason: 'pet_missing' };
@@ -227,8 +231,8 @@ export function validatePetSteal(player, pet, now) {
 }
 
 /**
- * 校验一次孵化。
- * 规则:必须是自己的宠物、在范围内、已过冷却、未完成孵化。
+ * Validate a hatch action.
+ * The pet must be yours, in range, off cooldown and not yet hatched.
  */
 export function validatePetHatch(player, pet, now) {
   if (!pet) return { ok: false, reason: 'pet_missing' };
@@ -257,7 +261,7 @@ export function startCooldown(player, key, durationMs, now) {
 }
 
 /* ------------------------------------------------------------------------- *
- * 杂项
+ * Helpers
  * ------------------------------------------------------------------------- */
 function round(value) {
   return Math.round(value * 100) / 100;
@@ -267,7 +271,7 @@ function roundVec(v) {
   return { x: round(v.x), y: round(v.y), z: round(v.z) };
 }
 
-/** 理论速度上限 */
+/** Theoretical speed limit */
 export function theoreticalMaxSpeed() {
   return PHYSICS.maxSpeed * (TIMING.tickMs / 1000);
 }
