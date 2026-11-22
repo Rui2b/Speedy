@@ -72,7 +72,7 @@ export function parseClientMessage(raw) {
     case CLIENT_MESSAGE.PONG:
     case CLIENT_MESSAGE.PING:
     case CLIENT_MESSAGE.HELLO:
-      return { type, payload: {} };
+      return { type, payload: { t: isFiniteNumber(data.t) ? data.t : 0 } };
     default:
       return { error: 'unknown_type' };
   }

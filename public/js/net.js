@@ -110,7 +110,8 @@ export class NetClient {
       }
       if (msg.type === 'pong') {
         this.lastPongAt = Date.now();
-        if (typeof msg.t === 'number') {
+        // t 是客户端自己发出的时间戳(服务器原样回显),相减得到真实 RTT
+        if (typeof msg.t === 'number' && msg.t > 0 && msg.t <= Date.now()) {
           this.rttMs = Math.max(0, Date.now() - msg.t);
         }
         return;

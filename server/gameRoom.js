@@ -216,7 +216,8 @@ export class GameRoom {
 
     switch (parsed.type) {
       case CLIENT_MESSAGE.PING:
-        session.send(SERVER_MESSAGE.PONG, { t: now });
+        // 必须回显客户端的时间戳,否则客户端算出来的是时钟偏差而不是 RTT
+        session.send(SERVER_MESSAGE.PONG, { t: parsed.payload.t });
         return 0;
       case CLIENT_MESSAGE.PONG:
         session.lastPongAt = now;
