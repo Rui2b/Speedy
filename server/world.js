@@ -15,6 +15,21 @@ import {
   RULES,
   VALID_SKINS,
 } from './config.js';
+import { createEgg, hatchDurationMs, tickHatch, updateFollow, startHatch } from './pets.js';
+import { gainSpeed } from './speedSystem.js';
+import { SPEED } from './gameConfig.js';
+import {
+  activePlatforms,
+  groundHeightAt,
+  isFallen,
+  nearestCheckpoint,
+  reachedGoal,
+  stageEntryPoint,
+  touchedCheckpoint,
+} from './obby.js';
+
+/** 复用 rebirth 出生点常量,避免两处写死不同坐标 */
+const SPEED_REBIRTH_SPAWN = SPEED.rebirthSpawn;
 
 function randomInDisc(radius) {
   const angle = Math.random() * Math.PI * 2;
@@ -37,8 +52,9 @@ export function normalizeSkin(skinId) {
 }
 
 /** 创建一个玩家运行时状态。位置由服务器分配,不信任客户端。 */
-export function createPlayerState({ uid, displayName, skinId, gems }) {
+export function createPlayerState({ uid, displayName, skinId, gems, save }) {
   const spawn = randomInDisc(GAME.spawnRadius);
+  const restored = save ?? {};
   return {
     uid,
     displayName: displayName || uid.slice(0, 8),
@@ -46,6 +62,25 @@ export function createPlayerState({ uid, displayName, skinId, gems }) {
     pos: { x: spawn.x, y: PHYSICS.groundY, z: spawn.z },
     vel: { x: 0, y: 0, z: 0 },
     onGround: true,
+
+    /* --- Speed 成长(全部服务端计算)--------------------------------- */
+    /** 当前累计速度,转生后清零 */
+    speed: Number.isFinite(restored.speed) ? restored.speed : 0,
+    /** 历史累计速度,永不重置 */
+    speedTotal: Number.isFinite(restored.speedTotal) ? restored.speedTotal : 0,
+    /** 转生次数 */
+    rebirth: Number.isFinite(restored.rebirth) ? restored.rebirth : 0,
+    /** speed 获取倍率 */
+    multiplier: Number.isFinite(restored.multiplier) && restored.multiplier > 0 ? restored.multiplier : 1,
+    /** treadmillId -> 有效期截止时间戳 */
+    treadmillUntil: new Map(),
+    /** 已通关的 stage id 集合 */
+    clearedStages: new Set(restored.clearedStages ?? []),
+    /** 当前所在:lobby 或某关 */
+    location: restored.location ?? { world: 'lobby', stage: 0 },
+    /** 最近检查点(掉落后复活用) */
+    checkpoint: restored.checkpoint ?? null,
+
     /** 最近一次输入,缺包时用于外推 */
     lastInput: { moveX: 0, moveZ: 0, jump: false },
     /** 最近一次收到输入包的时间戳,用于判定输入是否已过期 */
@@ -75,67 +110,105 @@ export function createPlayerState({ uid, displayName, skinId, gems }) {
 /**
  * 单个玩家的权威积分。dt 单位为秒。
  * 水平方向:输入决定目标速度,加速度逼近,摩擦衰减。
- * 垂直方向:跳跃冲量 + 重力,落地钳制在地面。
+ * 垂直方向:跳跃冲量 + 重力。
+ *
+ * `groundHeight` 是玩家脚下当前的支撑面高度(Obby 平台顶面),传 null 表示
+ * 用默认地面。Lobby 没有平台,传 null 即可。客户端预测用同一套函数,保证手感一致。
+ *
+ * @param {object} player
+ * @param {object} input
+ * @param {number} dt
+ * @param {number|null} [groundHeight]
+ * @param {number|null} [worldRadius] 圆形边界半径;传 null 不裁剪
  */
-export function integratePlayer(player, input, dt) {
-  const { maxSpeed, acceleration, friction, jumpImpulse, gravity, groundY, airControl } = PHYSICS;
+export function integratePlayer(player, input, dt, groundHeight = null, worldRadius = null) {
+  const baseGround = groundHeight === null ? PHYSICS.groundY : groundHeight;
 
-  // 输入归一化:防止斜向移动速度更快(正方形输入 → 圆形)
+  player.prevPos = player.prevPos ?? { x: player.pos.x, y: player.pos.y, z: player.pos.z };
+
+  /* --- 水平 --- */
+  const accel = computeHorizontalStep(player, input, dt);
+  player.vel.x = accel.vx;
+  player.vel.z = accel.vz;
+
+  /* --- 垂直 --- */
+  let grounded = player.onGround;
+  if (input.jump === true && grounded) {
+    player.vel.y = PHYSICS.jumpImpulse;
+    grounded = false;
+  }
+  if (!grounded) player.vel.y -= PHYSICS.gravity * dt;
+
+  player.pos.x += player.vel.x * dt;
+  player.pos.z += player.vel.z * dt;
+  player.pos.y += player.vel.y * dt;
+
+  // 落地:支撑面可能是平台,也可能是 lobby 地面
+  const support = groundHeight === null ? baseGround : groundHeight;
+  if (player.pos.y <= support && player.vel.y <= 0) {
+    player.pos.y = support;
+    player.vel.y = 0;
+    player.onGround = true;
+  } else {
+    player.onGround = false;
+  }
+
+  // 圆形边界只对 lobby 生效;关卡是直线延伸的,不裁剪
+  if (worldRadius !== null) {
+    const clamped = clampToRadius(player.pos.x, player.pos.z, worldRadius);
+    player.pos.x = clamped.x;
+    player.pos.z = clamped.z;
+  }
+}
+
+/**
+ * 纯函数:根据当前速度和输入算出下一帧水平速度。
+ * 抽出来是为了让客户端预测和服务端积分用同一段逻辑(同源参数的唯一实现)。
+ */
+export function computeHorizontalStep(player, input, dt) {
+  const { maxSpeed, acceleration, friction, airControl } = PHYSICS;
+
   let ix = Number(input.moveX);
   let iz = Number(input.moveZ);
   if (!Number.isFinite(ix)) ix = 0;
   if (!Number.isFinite(iz)) iz = 0;
   ix = Math.max(-1, Math.min(1, ix));
   iz = Math.max(-1, Math.min(1, iz));
-  const inputMagnitude = Math.hypot(ix, iz);
-  if (inputMagnitude > 1) {
-    ix /= inputMagnitude;
-    iz /= inputMagnitude;
+  const magnitude = Math.hypot(ix, iz);
+  if (magnitude > 1) {
+    ix /= magnitude;
+    iz /= magnitude;
   }
 
+  let vx = player.vel.x;
+  let vz = player.vel.z;
   const control = player.onGround ? 1 : airControl;
 
-  if (inputMagnitude > 0.01) {
-    const targetVx = ix * maxSpeed;
-    const targetVz = iz * maxSpeed;
-    player.vel.x = approach(player.vel.x, targetVx, acceleration * control * dt);
-    player.vel.z = approach(player.vel.z, targetVz, acceleration * control * dt);
+  if (magnitude > 0.01) {
+    vx = approach(vx, ix * maxSpeed, acceleration * control * dt);
+    vz = approach(vz, iz * maxSpeed, acceleration * control * dt);
   } else if (player.onGround) {
-    // 无输入:按摩擦衰减(以 tick 为基准做幂运算,保证不同 dt 下表现一致)
     const decay = Math.pow(friction, dt * TIMING.tickRate);
-    player.vel.x *= decay;
-    player.vel.z *= decay;
-    if (Math.abs(player.vel.x) < 0.05) player.vel.x = 0;
-    if (Math.abs(player.vel.z) < 0.05) player.vel.z = 0;
+    vx *= decay;
+    vz *= decay;
+    if (Math.abs(vx) < 0.05) vx = 0;
+    if (Math.abs(vz) < 0.05) vz = 0;
   }
 
-  // 硬性限速,防止浮点累积越界
-  const speed = Math.hypot(player.vel.x, player.vel.z);
+  const speed = Math.hypot(vx, vz);
   if (speed > maxSpeed) {
-    player.vel.x = (player.vel.x / speed) * maxSpeed;
-    player.vel.z = (player.vel.z / speed) * maxSpeed;
+    vx = (vx / speed) * maxSpeed;
+    vz = (vz / speed) * maxSpeed;
   }
 
-  // 垂直运动
-  if (input.jump === true && player.onGround) {
-    player.vel.y = jumpImpulse;
-    player.onGround = false;
-  }
-  player.vel.y -= gravity * dt;
+  return { vx, vz };
+}
 
-  player.pos.x += player.vel.x * dt;
-  player.pos.y += player.vel.y * dt;
-  player.pos.z += player.vel.z * dt;
-
-  if (player.pos.y <= groundY) {
-    player.pos.y = groundY;
-    player.vel.y = 0;
-    player.onGround = true;
-  }
-
-  const clamped = clampToWorld(player.pos.x, player.pos.z);
-  player.pos.x = clamped.x;
-  player.pos.z = clamped.z;
+function clampToRadius(x, z, radius) {
+  const dist = Math.hypot(x, z);
+  if (dist <= radius) return { x, z };
+  const scale = radius / dist;
+  return { x: x * scale, z: z * scale };
 }
 
 function approach(current, target, maxDelta) {
@@ -203,19 +276,8 @@ export class World {
   spawnPets() {
     const points = shuffle([...PET_SPAWN_POINTS]).slice(0, GAME.maxPets);
     for (const point of points) {
-      const pet = {
-        petId: crypto.randomUUID(),
-        ownerUid: null,
-        pos: { x: point.x, y: 0, z: point.z },
-        hatchProgress: 0,
-        isHatched: false,
-        species: 'blob',
-        rarity: 'common',
-        /** 抢夺冷却时间戳:被偷后进入保护期,期间任何人不能再次抢夺 */
-        stealCooldownUntil: 0,
-        /** 该宠物上次被偷的时间戳,用于校验与展示 */
-        lastStolenAt: 0,
-      };
+      // 野生宠物做成"蛋",由玩家捡起后孵化
+      const pet = createEgg(crypto.randomUUID(), point);
       this.pets.set(pet.petId, pet);
     }
   }
@@ -229,21 +291,27 @@ export class World {
         pet = {
           petId: record.petId,
           ownerUid: player.uid,
-          pos: { x: spawn.x, y: 0, z: spawn.z },
-          hatchProgress: record.hatchProgress ?? 0,
-          isHatched: Boolean(record.isHatched),
           species: record.species ?? 'blob',
           rarity: record.rarity ?? 'common',
+          isEgg: record.isEgg ?? !record.isHatched,
+          isHatched: Boolean(record.isHatched),
+          hatchProgress: record.hatchProgress ?? 0,
+          hatchStartedAt: record.hatchStartedAt ?? null,
+          hatchDurationMs: hatchDurationMs(record.rarity ?? 'common'),
+          pos: { x: spawn.x, y: 0, z: spawn.z },
           stealCooldownUntil: 0,
           lastStolenAt: 0,
+          lastUpdated: 0,
         };
         this.pets.set(pet.petId, pet);
       } else {
         pet.ownerUid = player.uid;
-        pet.hatchProgress = record.hatchProgress ?? pet.hatchProgress;
-        pet.isHatched = Boolean(record.isHatched);
         pet.species = record.species ?? pet.species;
         pet.rarity = record.rarity ?? pet.rarity;
+        pet.isEgg = record.isEgg ?? pet.isEgg;
+        pet.isHatched = Boolean(record.isHatched);
+        pet.hatchProgress = record.hatchProgress ?? pet.hatchProgress;
+        pet.hatchStartedAt = record.hatchStartedAt ?? pet.hatchStartedAt;
       }
       player.petIds.add(pet.petId);
     }
@@ -264,15 +332,139 @@ export class World {
     return this.players.get(uid) ?? null;
   }
 
-  /** 推进一个 tick。 */
-  step(dt, now) {
+  /** 取玩家当前所在的关卡运行时数据;在 lobby 返回 null。 */
+  stageFor(player, stages) {
+    if (player.location?.world !== 'obby') return null;
+    return stages.find((s) => s.id === player.location.stage) ?? null;
+  }
+
+  /**
+   * 关卡内每 tick 的判定:掉落复活、检查点更新、通关。
+   * 任何判定都在服务端,客户端只收到结果。
+   */
+  checkStageProgress(player, stage, now, onStageClear) {
+    // 1. 到达检查点 → 更新复活点
+    const cp = touchedCheckpoint(stage, player.pos);
+    if (cp) player.checkpoint = cp;
+
+    // 2. 掉落 → 回最近检查点
+    if (isFallen(stage, player.pos)) {
+      const respawn =
+        player.checkpoint ?? nearestCheckpoint(stage, player.pos) ?? stageEntryPoint(stage);
+      player.pos.x = respawn.x;
+      player.pos.y = respawn.y + 0.4;
+      player.pos.z = respawn.z;
+      player.vel.x = 0;
+      player.vel.y = 0;
+      player.vel.z = 0;
+      player.onGround = false;
+      player.justRespawned = true;
+      player.fellCount = (player.fellCount ?? 0) + 1;
+      return;
+    }
+
+    // 3. 踩到 goal → 通关(同一关只触发一次)
+    if (reachedGoal(stage, player.pos) && !player.clearedStages.has(stage.id)) {
+      player.clearedStages.add(stage.id);
+      player.stageEnteredAt = null;
+      const elapsed = player.stageStartedAt ? now - player.stageStartedAt : 0;
+      player.stageStartedAt = null;
+      onStageClear?.({ player, stage, elapsedMs: elapsed });
+    }
+  }
+
+  /** 让玩家进入某个关卡。 */
+  enterStage(player, stage, now) {
+    const entry = stageEntryPoint(stage);
+    player.location = { world: 'obby', stage: stage.id };
+    player.pos.x = entry.x;
+    player.pos.y = entry.y;
+    player.pos.z = entry.z;
+    player.vel.x = 0;
+    player.vel.y = 0;
+    player.vel.z = 0;
+    player.onGround = false;
+    player.checkpoint = stage.checkpoints[0] ?? null;
+    player.stageStartedAt = now;
+  }
+
+  /** 把玩家送回 lobby。 */
+  exitStage(player, now) {
+    const spawn = SPEED_REBIRTH_SPAWN;
+    player.location = { world: 'lobby', stage: 0 };
+    player.pos.x = spawn.x;
+    player.pos.y = spawn.y;
+    player.pos.z = spawn.z;
+    player.vel.x = 0;
+    player.vel.y = 0;
+    player.vel.z = 0;
+    player.onGround = true;
+    player.checkpoint = null;
+    player.stageStartedAt = null;
+    player.lastLobbyAt = now;
+  }
+
+  /**
+   * 推进一个 tick。
+   *
+   * @param {number} dt 秒
+   * @param {number} now 时间戳
+   * @param {Array<object>} stages buildStageRuntime() 产出的关卡运行时数据
+   * @param {(event: object) => void} [onStageClear] 通关回调
+   */
+  step(dt, now, stages = [], onStageClear = null) {
     this.tick += 1;
 
     for (const player of this.players.values()) {
       // 输入过期:客户端停发或掉线时不能让角色一直往前跑
       const stale = now - player.lastInputAt > TIMING.inputStaleMs;
       const input = stale ? IDLE_INPUT : player.lastInput;
-      integratePlayer(player, input, dt);
+
+      const stage = this.stageFor(player, stages);
+
+      // 关卡判定要在积分前做:上一帧可能已经把玩家推到死亡高度以下
+      if (stage) {
+        this.checkStageProgress(player, stage, now, onStageClear);
+        // 掉落复活后位置被重置,本 tick 不再积分,避免又把玩家推下去
+        if (player.justRespawned) {
+          player.justRespawned = false;
+          gainSpeed(player, now);
+          continue;
+        }
+      }
+
+      const groundHeight = stage ? groundHeightAt(stage, player.pos, now) : null;
+
+      integratePlayer(
+        player,
+        input,
+        dt,
+        groundHeight,
+        stage ? null : GAME.worldRadius,
+      );
+
+      // 积分后再判一次:这一帧可能刚踩进 goal
+      if (stage) {
+        this.checkStageProgress(player, stage, now, onStageClear);
+      }
+
+      // Speed 成长(服务端权威)
+      gainSpeed(player, now);
+
+      // 朝向:给宠物跟随用
+      if (Math.hypot(player.vel.x, player.vel.z) > 0.1) {
+        player.facing = Math.atan2(player.vel.x, player.vel.z);
+      }
+    }
+
+    // 宠物:孵化计时 + 跟随主人
+    for (const pet of this.pets.values()) {
+      if (pet.isEgg) {
+        if (pet.hatchStartedAt) tickHatch(pet, now);
+      } else if (pet.ownerUid) {
+        const owner = this.players.get(pet.ownerUid);
+        if (owner) updateFollow(pet, owner, now);
+      }
     }
 
     for (const gem of this.gems.values()) {

@@ -272,7 +272,12 @@ async function main() {
   );
   record('B receives world_snapshot containing A', true);
   record('snapshot carries gems', Array.isArray(snapshot.gems) && snapshot.gems.length > 0);
-  record('snapshot carries pets', Array.isArray(snapshot.pets));
+  // 宠物位置按更低频率下发,所以要等到一条带 pets 的快照
+  const petSnapshot = await clientB.waitFor(
+    (m) => m.type === 'world_snapshot' && Array.isArray(m.pets),
+    5000,
+  );
+  record('snapshot carries pets', Array.isArray(petSnapshot.pets));
 
   const snapshotB2 = await clientB.waitFor((m) => m.type === 'world_snapshot', 3000);
   record('snapshot excludes the receiver', !snapshotB2.players.some((p) => p.uid === welcomeB.uid));

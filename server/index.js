@@ -249,8 +249,9 @@ function handleConfig(req, res) {
 function handleHealth(req, res) {
   sendJson(res, 200, {
     ok: true,
-    ticks: room.world.tick,
-    online: room.world.onlineCount,
+    ticks: room.tickCount,
+    online: room.rooms.onlineCount,
+    rooms: room.rooms.rooms.size,
     maxOnline: GAME.maxOnline,
     uptimeSec: Math.round(process.uptime()),
     store: store.enabled ? 'postgres' : 'memory',
@@ -358,13 +359,26 @@ wss.on('connection', async (ws, req) => {
     log.warn('会话审计创建失败', { message: err.message });
   }
 
-  const session = await room.attach(ws, {
-    uid: user.uid,
-    displayName: user.display_name,
-    skinId: user.equipped_skin,
-    jti: verdict.payload.jti,
-    auditId,
-  });
+  // 从 URL 取房间参数,便于分享房间链接
+  let roomId = '';
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    roomId = url.searchParams.get('room') ?? '';
+  } catch {
+    roomId = '';
+  }
+
+  const session = await room.attach(
+    ws,
+    {
+      uid: user.uid,
+      displayName: user.display_name,
+      skinId: user.equipped_skin,
+      jti: verdict.payload.jti,
+      auditId,
+    },
+    roomId,
+  );
   if (!session) return;
 
   ws.on('message', (raw) => {

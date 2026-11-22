@@ -33,7 +33,7 @@ function loadDotEnv() {
 }
 loadDotEnv();
 
-function num(key, fallback) {
+export function num(key, fallback) {
   const raw = process.env[key];
   if (raw === undefined || raw === '') return fallback;
   const parsed = Number(raw);

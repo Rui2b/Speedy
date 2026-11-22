@@ -302,28 +302,27 @@ export class GameView {
 
   createPetMesh() {
     const group = new THREE.Group();
+
+    // 蛋:椭球做底,顶部一个小尖角
     const body = new THREE.Mesh(
       new THREE.SphereGeometry(SIZES.pet / 2, 20, 16),
       new THREE.MeshStandardMaterial({
-        color: PALETTE.pet,
-        roughness: 0.68,
-        metalness: 0.02,
+        color: PALETTE.egg,
+        roughness: 0.55,
+        metalness: 0.04,
       }),
     );
-    body.position.y = SIZES.pet / 2 + 0.26;
+    body.scale.set(1, 1.25, 1);
+    body.position.y = SIZES.pet / 2 + 0.24;
     group.add(body);
 
-    const eyeGeo = new THREE.SphereGeometry(SIZES.pet * 0.075, 8, 8);
-    const eyeMat = new THREE.MeshBasicMaterial({ color: 0x17140f });
-    for (const sign of [-1, 1]) {
-      const eye = new THREE.Mesh(eyeGeo, eyeMat);
-      eye.position.set(
-        sign * SIZES.pet * 0.15,
-        body.position.y + SIZES.pet * 0.1,
-        SIZES.pet * 0.43,
-      );
-      group.add(eye);
-    }
+    const shell = new THREE.Mesh(
+      new THREE.SphereGeometry(SIZES.pet / 2.1, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.42),
+      new THREE.MeshStandardMaterial({ color: PALETTE.eggShell, roughness: 0.6 }),
+    );
+    shell.scale.set(1, 1.25, 1);
+    shell.position.y = body.position.y;
+    group.add(shell);
 
     const halo = new THREE.Mesh(
       new THREE.CircleGeometry(SIZES.pet * 1.3, 24),
@@ -339,6 +338,7 @@ export class GameView {
     group.add(halo);
 
     group.userData.body = body;
+    group.userData.shell = shell;
     group.userData.halo = halo;
     return group;
   }
@@ -510,41 +510,209 @@ export class GameView {
     this.updateOthers(renderTime);
     this.updateGems(dt);
     this.updatePets(dt);
+    this.updateTrails(dt);
+    this.updateBlinkers(dt);
     if (this.attractMode) this.updateAttractCamera(dt);
     else this.updateCamera(dt);
 
     this.renderer.render(this.scene, this.camera);
   }
 
+  /**
+   * 本地玩家使用 predict 模块产出的位置。
+   * 位置与朝向都由 LocalPredictor 决定(它只用服务器下发的常量),
+   * 这里只把结果搬到网格上。
+   */
   updateSelf(dt) {
     if (!this.selfGroup) return;
-    this.predicted.lerp(this.authoritative, convergeFactor(14, dt));
-    this.selfGroup.position.set(this.predicted.x, this.predicted.y, this.predicted.z);
 
-    const vx = this.authoritativeVel.x;
-    const vz = this.authoritativeVel.z;
-    if (Math.hypot(vx, vz) > 0.25) {
-      this.facing = lerpAngle(this.facing, Math.atan2(vx, vz), convergeFactor(12, dt));
+    if (this.predictor) {
+      this.selfGroup.position.set(
+        this.predictor.pos.x,
+        this.predictor.pos.y,
+        this.predictor.pos.z,
+      );
+      const vx = this.predictor.vel.x;
+      const vz = this.predictor.vel.z;
+      if (Math.hypot(vx, vz) > 0.25) {
+        this.facing = lerpAngle(this.facing, Math.atan2(vx, vz), convergeFactor(16, dt));
+      }
+    } else {
+      this.selfGroup.position.set(this.predicted.x, this.predicted.y, this.predicted.z);
     }
     this.selfGroup.rotation.y = this.facing;
+
+    this.pushTrail(this.selfGroup.position, this.facing);
   }
 
-  /** 本地预测:视觉即时响应,再由服务器纠正 */
+  /**
+   * 本地预测。
+   *
+   * 现在由 predictor.js 里的 LocalPredictor 负责,它使用服务器下发的物理常量,
+   * 与服务端积分公式完全一致。这个方法只是每帧驱动它。
+   */
   predictMotion(dt, input) {
-    if (!this.selfGroup) return;
-    const speed = MAP.predictedSpeed;
-    const len = Math.hypot(input.moveX, input.moveZ);
-    if (len < 0.01) return;
-    const nx = input.moveX / Math.max(1, len);
-    const nz = input.moveZ / Math.max(1, len);
-    this.predicted.x += nx * speed * dt;
-    this.predicted.z += nz * speed * dt;
-    const dist = Math.hypot(this.predicted.x, this.predicted.z);
-    if (dist > MAP.worldRadius) {
-      const scale = MAP.worldRadius / dist;
-      this.predicted.x *= scale;
-      this.predicted.z *= scale;
+    if (!this.predictor) return;
+    // jump 由输入层在网络层发出后清除,这里直接用当前采样
+    this.predictor.step(dt, input, true);
+  }
+
+  /** 每帧把本地预测位置同步到相机/网格用的旧字段(供相机跟随)。 */
+  syncPredictedFromPredictor() {
+    if (!this.predictor) return;
+    this.predicted.set(
+      this.predictor.pos.x,
+      this.predictor.pos.y,
+      this.predictor.pos.z,
+    );
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 关卡几何与拖尾
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 用服务器下发的关卡几何搭出可视模型。
+   * 这里只负责画:平台、检查点、goal、消失平台。
+   * 是否站得住、是否通关,全部由服务器判定。
+   */
+  buildStages(stages) {
+    this.stages = stages;
+    if (this.stageGroup) {
+      this.stageGroup.removeFromParent();
+      this.stageGroup.traverse((obj) => {
+        obj.geometry?.dispose?.();
+        obj.material?.dispose?.();
+      });
     }
+
+    this.stageGroup = new THREE.Group();
+    /** blinker id -> { mesh, periodMs, enabledMs, phaseMs } */
+    this.blinkerMeshes = new Map();
+    /** stage id -> goal mesh */
+    this.goalMeshes = new Map();
+
+    for (const stage of stages) {
+      for (const solid of stage.solids) {
+        this.stageGroup.add(this.makeBoxMesh(solid.box, PALETTE.platformSolid));
+      }
+
+      for (const blinker of stage.blinkers) {
+        const mesh = this.makeBoxMesh(blinker.box, PALETTE.platformBlink);
+        this.stageGroup.add(mesh);
+        this.blinkerMeshes.set(blinker.id, { mesh, ...blinker });
+      }
+
+      for (const cp of stage.checkpoints) {
+        const flag = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.06, 1.1, 8),
+          new THREE.MeshBasicMaterial({ color: PALETTE.checkpoint }),
+        );
+        flag.position.set(cp.pos.x, cp.pos.y + 0.55, cp.pos.z);
+        this.stageGroup.add(flag);
+      }
+
+      // goal 用半透明发光体,一眼可辨
+      const goal = new THREE.Mesh(
+        new THREE.BoxGeometry(
+          stage.goal.max.x - stage.goal.min.x,
+          stage.goal.max.y - stage.goal.min.y,
+          stage.goal.max.z - stage.goal.min.z,
+        ),
+        new THREE.MeshBasicMaterial({
+          color: PALETTE.goal,
+          transparent: true,
+          opacity: 0.18,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      goal.position.set(
+        (stage.goal.min.x + stage.goal.max.x) / 2,
+        (stage.goal.min.y + stage.goal.max.y) / 2,
+        (stage.goal.min.z + stage.goal.max.z) / 2,
+      );
+      this.stageGroup.add(goal);
+      this.goalMeshes.set(stage.id, goal);
+    }
+
+    this.scene.add(this.stageGroup);
+  }
+
+  /** 由 AABB 生成一个盒子网格。 */
+  makeBoxMesh(box, color) {
+    const sx = box.max.x - box.min.x;
+    const sy = box.max.y - box.min.y;
+    const sz = box.max.z - box.min.z;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(sx, sy, sz),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.05 }),
+    );
+    mesh.position.set(
+      (box.min.x + box.max.x) / 2,
+      (box.min.y + box.max.y) / 2,
+      (box.min.z + box.max.z) / 2,
+    );
+    return mesh;
+  }
+
+  /** 消失平台按服务器给的周期显隐。客户端只做视觉,不参与判定。 */
+  updateBlinkers() {
+    if (!this.blinkerMeshes) return;
+    const now = performance.now();
+    for (const entry of this.blinkerMeshes.values()) {
+      const period = Math.max(1, entry.periodMs);
+      const enabled = Math.max(0, Math.min(period, entry.enabledMs));
+      const phase = ((now + (entry.phaseMs ?? 0)) % period + period) % period;
+      const on = phase < enabled;
+      entry.mesh.visible = on;
+      entry.mesh.material.opacity = on ? 1 : 0.12;
+      entry.mesh.material.transparent = !on;
+    }
+  }
+
+  /** 给本地玩家创建拖尾。 */
+  ensureTrail() {
+    if (this.trail) return;
+    const count = 24;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    const mat = new THREE.PointsMaterial({
+      color: PALETTE.trail,
+      size: 0.22,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this.trail = new THREE.Points(geo, mat);
+    this.trail.frustumCulled = false;
+    this.trailHistory = [];
+    this.scene.add(this.trail);
+  }
+
+  /** 记录一个拖尾点(只在真的移动时)。 */
+  pushTrail(position, facing) {
+    if (!this.trail) return;
+    const last = this.trailHistory[this.trailHistory.length - 1];
+    const minStep = 0.35;
+    if (last && Math.hypot(position.x - last.x, position.z - last.z) < minStep) return;
+
+    this.trailHistory.push({ x: position.x, y: position.y + 0.45, z: position.z });
+    if (this.trailHistory.length > 24) this.trailHistory.shift();
+  }
+
+  updateTrails() {
+    if (!this.trail) return;
+    const positions = this.trail.geometry.attributes.position;
+    const arr = positions.array;
+    for (let i = 0; i < 24; i += 1) {
+      const point = this.trailHistory[i];
+      arr[i * 3] = point ? point.x : 0;
+      arr[i * 3 + 1] = point ? point.y : -999; // 没历史就藏到地下
+      arr[i * 3 + 2] = point ? point.z : 0;
+    }
+    positions.needsUpdate = true;
   }
 
   updateOthers(renderTime) {

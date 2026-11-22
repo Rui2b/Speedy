@@ -364,13 +364,13 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 
 ## 配置项
 
-所有可调参数集中在 [`server/config.js`](server/config.js)，并支持环境变量覆盖：
+所有可调参数集中在 [`server/config.js`](server/config.js) 与 [`server/gameConfig.js`](server/gameConfig.js),并支持环境变量覆盖:
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `TICK_RATE` | 20 | 服务器模拟频率 |
 | `BROADCAST_RATE` | 10 | 下行快照频率 |
-| `MAX_ONLINE` | 30 | 同时在线上限 |
+| `MAX_ONLINE` | 30 | 全局同时在线上限 |
 | `PLAYER_MAX_SPEED` | 6 | 最大速度 units/s |
 | `PLAYER_ACCELERATION` | 12 | 加速度 units/s² |
 | `PLAYER_FRICTION` | 0.9 | 每 tick 阻尼系数 |
@@ -382,13 +382,92 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 | `CHEAT_STRIKES_BEFORE_KICK` | 8 | 累计多少次异常后断开 |
 | `MAX_INPUT_PACKETS_PER_SEC` | 22 | 输入包限流 |
 | `MAX_ACTION_PACKETS_PER_SEC` | 10 | 操作包限流 |
+| `SPEED_BASE_GAIN_PER_TICK` | 0.02 | 每 tick 基础 speed 增量 |
+| `REBIRTH_MIN_SPEED` | 100 | 转生门槛 |
+| `REBIRTH_MULTIPLIER_GAIN` | 1.5 | 每次转生的倍率乘数 |
+| `ROOM_MAX_PLAYERS` | 20 | 单房间人数上限 |
+| `ROOM_MAX_ROOMS` | 12 | 房间总数上限 |
 
 玩法规格：拾取半径 2.2、偷宠物半径 2.5、偷宠物冷却 12s/pet、孵化冷却 20s/pet。
 
-地图刷新点、皮肤白名单也在 `config.js` 里，改完重启即可生效。
+地图刷新点、皮肤白名单在 `config.js`;关卡几何、跑步机、宠物稀有度在 `gameConfig.js`。
+改完重启即可生效。
 
 换美术资源只改 [`public/js/assets.js`](public/js/assets.js)：
 配色、模型尺寸、相机、皮肤颜色/贴图都在那里。
+
+---
+
+## Speed Escape 玩法(本轮新增)
+
+### 成长循环
+
+| 机制 | 说明 |
+| --- | --- |
+| **Speed** | 玩家权威速度向量长度超过阈值时,每 tick 累加 `baseGain × multiplier`。站着不动不涨。 |
+| **跑步机** | lobby 里三台,站上去且处于有效时段内,增量再乘倍率。用宝石买 10 分钟:5 / 15 / 40 颗。 |
+| **Rebirth** | speed 达到门槛后可转生:清空 speed、rebirth+1、倍率 ×1.5、回到 lobby 出生点。 |
+| **Obby** | 1 个 World × 3 个 Stage。进关需要达到 `minSpeed`,掉落回最近检查点,踩到 goal 通关。 |
+| **排行榜** | 按 rebirth → 累计 speed → 通关数排序,每 10 秒推送一次。 |
+| **房间** | 默认进公共 `lobby-1`;可创建/加入其它房间,各自独立世界与排行榜。 |
+
+三台跑步机、三个关卡的坐标与门禁都写在 [`server/gameConfig.js`](server/gameConfig.js)。
+
+### 客户端本地预测(手感)
+
+需求里最重要的一条。实现要点:
+
+1. 客户端有**一套与服务端完全相同**的物理推进函数,常量由 `welcome.physics` 下发
+   (来自服务端同一份 `config.js`),两边不各写一套。
+   校验脚本实测两边速度**逐位相同**(diff = 0)。
+2. 按键立刻驱动本地预测,画面无延迟。
+3. 收到权威位置后,用 **100ms** 的 lerp 收敛到权威位置。
+4. 偏差超过 **1.8 单位**时不做平滑,直接对齐(作弊/丢包保护)。
+5. 其他玩家不做预测,只用快照插值(130ms 延迟缓冲)。
+6. **本地预测只影响画面**。拾取、偷宠物、通关、speed 全部由服务器裁决。
+
+代码在 [`public/js/predictor.js`](public/js/predictor.js)。
+
+### 数据库变更
+
+本轮新增 [`db/migrate-speed-obby.sql`](db/migrate-speed-obby.sql),用增量方式扩展,不删旧字段:
+
+- `users`: `speed`、`speed_total`、`rebirth`、`multiplier`、`current_world`、`current_stage`、`current_checkpoint`
+- `player_progress`: 每玩家每关卡的通关状态
+- `pets`: `is_egg`、`hatched_at`、`hatch_started_at`
+
+应用方式:
+
+```bash
+DATABASE_URL=... node scripts/migrate.js
+# 或指定单个文件
+DATABASE_URL=... node scripts/migrate.js db/migrate-speed-obby.sql
+```
+
+脚本幂等,重复执行安全。
+
+### 本地测试新功能
+
+```bash
+npm start &
+node test/e2e.mjs          # 26 项:协议 / 鉴权 / 物理 / 防作弊
+node test/progression.mjs  # 23 项:成长 / 转生 / 跑步机 / 关卡 / 房间 / 排行榜
+DATABASE_URL=... node test/multiplayer.mjs   # 14 项:偷宠物
+```
+
+`progression.mjs` 覆盖:物理常量下发、移动涨 speed、静止不涨、转生门槛、
+跑步机宝石不足、关卡顺序解锁与 speed 门禁、进入关卡传送、掉落复活、
+退出关卡、房间列表/切换/非法 id、排行榜内容、**客户端上传 speed 被忽略**、
+断线重连从 PostgreSQL 恢复进度。
+
+手动冒烟:
+
+1. 登录,按 `W` 跑动,左上角 speed 从 0 往上涨
+2. 捡 5 颗宝石 → 点 Treadmills 里的 `Buy`,倒计时出现,speed 涨得更快
+3. 攒到 100 speed → 按 `R`,rebirth +1、倍率变 ×1.5
+4. 点 Stage 1 的 `Enter`,跳到关卡;跳到最高平台踩进发光区 → 提示通关
+5. 中途往侧面掉下去 → 自动回到最近检查点
+6. 按 `B` 看宠物背包;点 Room 的 `Change` 换房间
 
 ### Cloudflare Turnstile(注册与登录人机认证)
 

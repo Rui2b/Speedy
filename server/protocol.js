@@ -11,6 +11,18 @@ export const CLIENT_MESSAGE = {
   PICK_GEM: 'try_pick_gem',
   STEAL_PET: 'try_steal_pet',
   HATCH_PET: 'try_hatch_pet',
+  /** 转生 */
+  REBIRTH: 'request_rebirth',
+  /** 用宝石买跑步机时长 */
+  BUY_TREADMILL: 'buy_treadmill',
+  /** 进入 / 退出关卡 */
+  ENTER_STAGE: 'enter_stage',
+  EXIT_STAGE: 'exit_stage',
+  /** 切换房间 */
+  JOIN_ROOM: 'join_room',
+  /** 请求排行榜 / 房间列表 */
+  REQUEST_LEADERBOARD: 'request_leaderboard',
+  REQUEST_ROOMS: 'request_rooms',
   PONG: 'pong',
   HELLO: 'hello',
   PING: 'ping',
@@ -25,6 +37,14 @@ export const SERVER_MESSAGE = {
   PING: 'ping',
   ERROR: 'error',
   INVENTORY: 'inventory',
+  /** speed / rebirth / 倍率 / 跑步机时段 */
+  PROGRESS: 'progress',
+  /** 排行榜快照 */
+  LEADERBOARD: 'leaderboard',
+  /** 房间列表 */
+  ROOMS: 'rooms',
+  /** 关卡几何与当前进度 */
+  STAGE: 'stage_state',
   KICK: 'kick',
 };
 
@@ -69,6 +89,18 @@ export function parseClientMessage(raw) {
     case CLIENT_MESSAGE.STEAL_PET:
     case CLIENT_MESSAGE.HATCH_PET:
       return parsePetAction(data, type);
+    case CLIENT_MESSAGE.REBIRTH:
+    case CLIENT_MESSAGE.REQUEST_LEADERBOARD:
+    case CLIENT_MESSAGE.REQUEST_ROOMS:
+      return { type, payload: {} };
+    case CLIENT_MESSAGE.BUY_TREADMILL:
+      return parseTreadmill(data);
+    case CLIENT_MESSAGE.ENTER_STAGE:
+      return parseEnterStage(data);
+    case CLIENT_MESSAGE.EXIT_STAGE:
+      return { type, payload: {} };
+    case CLIENT_MESSAGE.JOIN_ROOM:
+      return parseJoinRoom(data);
     case CLIENT_MESSAGE.PONG:
     case CLIENT_MESSAGE.PING:
     case CLIENT_MESSAGE.HELLO:
@@ -76,6 +108,34 @@ export function parseClientMessage(raw) {
     default:
       return { error: 'unknown_type' };
   }
+}
+
+/**
+ * 跑步机购买请求。
+ * 只接受 treadmillId —— 价格、倍率、时长全部由服务器配置决定,
+ * 客户端即使传了价格也会被忽略。
+ */
+function parseTreadmill(data) {
+  if (!isSafeId(data.treadmillId, 32)) return { error: 'bad_treadmill_id' };
+  return { type: CLIENT_MESSAGE.BUY_TREADMILL, payload: { treadmillId: data.treadmillId } };
+}
+
+/** 进入关卡。stage 必须是整数;服务端还会再校验 speed 门槛与存在性。 */
+function parseEnterStage(data) {
+  const stage = data.stage;
+  if (!Number.isInteger(stage) || stage < 0 || stage > 999) {
+    return { error: 'bad_stage' };
+  }
+  return { type: CLIENT_MESSAGE.ENTER_STAGE, payload: { stage } };
+}
+
+/** 切换房间。空字符串表示回默认房间。 */
+function parseJoinRoom(data) {
+  const roomId = data.roomId === undefined || data.roomId === null ? '' : data.roomId;
+  if (typeof roomId !== 'string' || roomId.length > 24) {
+    return { error: 'bad_room_id' };
+  }
+  return { type: CLIENT_MESSAGE.JOIN_ROOM, payload: { roomId: roomId.trim().toLowerCase() } };
 }
 
 /**

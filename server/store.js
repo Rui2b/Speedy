@@ -27,11 +27,17 @@ class NullStore {
     throw new Error('database_unavailable');
   }
   async loadProfile() {
-    return { inventory: { gems: 0 }, pets: [] };
+    return { inventory: { gems: 0 }, save: {}, pets: [] };
   }
   async recordLogin() {}
   async recordDisconnect() {}
   async flushInventory() {}
+  async saveProgress() {}
+  async saveSpeeds() {}
+  async markHatchStarted() {}
+  async completeStage() {
+    return false;
+  }
   async stealPet() {
     return false;
   }
@@ -140,27 +146,129 @@ export class PgStore {
   /* ----------------------------- 存档 ---------------------------------- */
 
   async loadProfile(uid) {
-    const [inv, pets] = await Promise.all([
+    const [user, inv, pets, progress] = await Promise.all([
+      this.pool.query(
+        `SELECT speed, speed_total, rebirth, multiplier,
+                current_world, current_stage, current_checkpoint
+           FROM users WHERE uid = $1`,
+        [uid],
+      ),
       this.pool.query(
         'SELECT gems, gems_earned, pets_stolen, pets_lost, pets_hatched FROM player_inventory WHERE uid = $1',
         [uid],
       ),
       this.pool.query(
-        `SELECT pet_id, species, rarity, hatch_progress, is_hatched
+        `SELECT pet_id, species, rarity, hatch_progress, is_hatched, is_egg, hatch_started_at
            FROM pets WHERE owner_uid = $1 ORDER BY created_at`,
         [uid],
       ),
+      this.pool.query(
+        'SELECT world, stage, is_completed FROM player_progress WHERE uid = $1',
+        [uid],
+      ),
     ]);
+
+    const row = user.rows[0] ?? {};
+
     return {
-      inventory: inv.rows[0] ?? { gems: 0, gems_earned: 0, pets_stolen: 0, pets_lost: 0, pets_hatched: 0 },
-      pets: pets.rows.map((row) => ({
-        petId: row.pet_id,
-        species: row.species,
-        rarity: row.rarity,
-        hatchProgress: row.hatch_progress,
-        isHatched: row.is_hatched,
+      inventory: inv.rows[0] ?? {
+        gems: 0,
+        gems_earned: 0,
+        pets_stolen: 0,
+        pets_lost: 0,
+        pets_hatched: 0,
+      },
+      save: {
+        speed: Number(row.speed ?? 0),
+        speedTotal: Number(row.speed_total ?? 0),
+        rebirth: Number(row.rebirth ?? 0),
+        multiplier: Number(row.multiplier ?? 1),
+        location: {
+          world: row.current_world ?? 'lobby',
+          stage: Number(row.current_stage ?? 0),
+        },
+        checkpoint: row.current_checkpoint ?? null,
+        clearedStages: progress.rows
+          .filter((r) => r.is_completed)
+          .map((r) => Number(r.stage)),
+      },
+      pets: pets.rows.map((p) => ({
+        petId: p.pet_id,
+        species: p.species,
+        rarity: p.rarity,
+        hatchProgress: p.hatch_progress,
+        isHatched: p.is_hatched,
+        isEgg: p.is_egg,
+        hatchStartedAt: p.hatch_started_at ? new Date(p.hatch_started_at).getTime() : null,
       })),
     };
+  }
+
+  /**
+   * 保存速度成长与关卡位置。
+   * 下线时调用一次,不每 tick 写。
+   */
+  async saveProgress(uid, save) {
+    await this.pool.query(
+      `UPDATE users
+          SET speed = $2,
+              speed_total = $3,
+              rebirth = $4,
+              multiplier = $5,
+              current_world = $6,
+              current_stage = $7,
+              current_checkpoint = $8,
+              last_seen_at = now()
+        WHERE uid = $1`,
+      [
+        uid,
+        Math.max(0, save.speed ?? 0),
+        Math.max(0, save.speedTotal ?? 0),
+        Math.max(0, save.rebirth ?? 0),
+        save.multiplier && save.multiplier > 0 ? save.multiplier : 1,
+        save.location?.world ?? 'lobby',
+        save.location?.stage ?? 0,
+        save.checkpoint ? JSON.stringify(save.checkpoint) : null,
+      ],
+    );
+  }
+
+  /**
+   * 记录一个 stage 通关。已通关的不再重复写。
+   * @returns {Promise<boolean>} 本次是否是新通关
+   */
+  async completeStage(uid, world, stage, timeMs) {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO player_progress (uid, world, stage, is_completed, best_time_ms, completed_at)
+       VALUES ($1, $2, $3, true, $4, now())
+       ON CONFLICT (uid, world, stage)
+       DO UPDATE SET is_completed = true,
+                     best_time_ms = LEAST(
+                       COALESCE(player_progress.best_time_ms, EXCLUDED.best_time_ms),
+                       EXCLUDED.best_time_ms
+                     ),
+                     completed_at = COALESCE(player_progress.completed_at, now()),
+                     updated_at = now()
+       WHERE player_progress.is_completed = false`,
+      [uid, world, stage, Math.max(0, Math.round(timeMs ?? 0))],
+    );
+    // 只统计"从 false 变 true"的那一次
+    return rowCount > 0;
+  }
+
+  /** 批量保存速度(可选:定时落库,降低崩溃丢失) */
+  async saveSpeeds(entries) {
+    if (entries.length === 0) return;
+    const uids = entries.map((e) => e.uid);
+    const speeds = entries.map((e) => e.speed);
+    const totals = entries.map((e) => e.speedTotal);
+    await this.pool.query(
+      `UPDATE users AS u
+          SET speed = d.speed, speed_total = d.total, last_seen_at = now()
+         FROM UNNEST($1::uuid[], $2::double precision[], $3::double precision[]) AS d(uid, speed, total)
+        WHERE u.uid = d.uid`,
+      [uids, speeds, totals],
+    );
   }
 
   /** 把内存中累积的宝石增量攒批写入。index.js 每 5 秒调用一次。 */
@@ -255,7 +363,9 @@ export class PgStore {
 
   async updateHatchProgress(petId, ownerUid, progress, isHatched) {
     await this.pool.query(
-      `UPDATE pets SET hatch_progress = $3, is_hatched = $4
+      `UPDATE pets SET hatch_progress = $3, is_hatched = $4,
+                       is_egg = NOT $4,
+                       hatched_at = CASE WHEN $4 THEN COALESCE(hatched_at, now()) ELSE hatched_at END
         WHERE pet_id = $1 AND owner_uid = $2`,
       [petId, ownerUid, Math.min(100, Math.max(0, progress)), isHatched],
     );
@@ -265,6 +375,15 @@ export class PgStore {
         [ownerUid],
       );
     }
+  }
+
+  /** 记录孵化开始时间。进度由 tick 按真实时间推进,重启也不漂移。 */
+  async markHatchStarted(petId, ownerUid, startedAtMs) {
+    await this.pool.query(
+      `UPDATE pets SET hatch_started_at = to_timestamp($3 / 1000.0)
+        WHERE pet_id = $1 AND owner_uid = $2 AND hatch_started_at IS NULL`,
+      [petId, ownerUid, startedAtMs],
+    );
   }
 
   async startSessionAudit(uid, jti) {

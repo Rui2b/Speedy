@@ -11,6 +11,8 @@ import { InputController } from './input.js';
 import { NetClient } from './net.js';
 import { ACTION_KEYS, findNearestGem, findNearestPet } from './targeting.js';
 import { TurnstileGate } from './turnstile.js';
+import { LocalPredictor } from './predictor.js';
+import { GameUi } from './gameUi.js';
 
 const el = {
   canvas: document.getElementById('scene'),
@@ -47,6 +49,17 @@ const state = {
 const hud = new Hud();
 const view = new GameView(el.canvas);
 const input = new InputController();
+
+/** 本地预测器,收到 welcome 后用服务器下发的物理常量初始化 */
+let predictor = null;
+
+const gameUi = new GameUi({
+  onBuyTreadmill: (id) => net.send({ type: 'buy_treadmill', treadmillId: id }),
+  onEnterStage: (stage) => net.send({ type: 'enter_stage', stage }),
+  onExitStage: () => net.send({ type: 'exit_stage' }),
+  onRebirth: () => net.send({ type: 'request_rebirth' }),
+  onJoinRoom: (roomId) => net.send({ type: 'join_room', roomId }),
+});
 
 const gate = new TurnstileGate({
   slot: el.turnstileSlot,
@@ -210,6 +223,7 @@ function startGame() {
   setLoading(true, 'Connecting to the server');
 
   hud.showGameUi();
+  gameUi.show();
   input.setEnabled(true);
 
   net.connect();
@@ -231,17 +245,57 @@ function setLoading(show, text) {
  * ------------------------------------------------------------------------- */
 function handleServerMessage(msg) {
   switch (msg.type) {
-    case 'welcome':
+    case 'welcome': {
       state.uid = msg.uid;
       state.gems = msg.self?.gems ?? 0;
       state.pets = msg.self?.pets ?? [];
       state.lastSelfPos = msg.self?.pos ?? { x: 0, y: 0, z: 0 };
       state.roster.clear();
       for (const entry of msg.roster ?? []) state.roster.set(entry.uid, entry);
+
+      // 用服务器下发的物理常量建本地预测器,保证两边参数同源
+      if (msg.physics) {
+        predictor = new LocalPredictor(msg.physics);
+        predictor.snapTo(state.lastSelfPos);
+        view.predictor = predictor;
+        view.ensureTrail();
+      }
+
       view.applyWelcome(msg);
+      if (Array.isArray(msg.stages)) view.buildStages(msg.stages);
+
+      gameUi.applyWelcome(msg);
+      if (msg.progress) gameUi.applyProgress(msg.progress);
+      if (Array.isArray(msg.rooms)) gameUi.applyRooms(msg.rooms);
+
       hud.setGems(state.gems);
       hud.setPets(state.pets);
       setLoading(false);
+      break;
+    }
+
+    case 'progress':
+      state.progress = msg;
+      state.speed = msg.speed;
+      gameUi.applyProgress(msg);
+      hud.setOnline(state.online);
+      break;
+
+    case 'leaderboard':
+      gameUi.applyLeaderboard(msg);
+      break;
+
+    case 'rooms':
+      gameUi.applyRooms(msg.rooms);
+      break;
+
+    case 'stage_state':
+      // 进入/退出关卡:本地预测器要立刻对齐,否则会看到一段滑行
+      if (msg.stageId === null) {
+        state.inStage = null;
+      } else {
+        state.inStage = msg.stageId;
+      }
       break;
 
     case 'world_snapshot':
@@ -257,6 +311,8 @@ function handleServerMessage(msg) {
         for (const entry of msg.roster) state.roster.set(entry.uid, entry);
       }
       view.applySelfState(msg);
+      // 权威位置交给预测器收敛:常态 100ms lerp,偏差超阈值直接对齐
+      if (predictor) predictor.reconcile(msg.pos, msg.vel, msg.onGround);
       net.setPreviewPosition(msg.pos);
       hud.setGems(state.gems);
       hud.setOnline(state.online);
@@ -267,6 +323,7 @@ function handleServerMessage(msg) {
       state.pets = msg.pets ?? state.pets;
       hud.setGems(state.gems);
       hud.setPets(state.pets);
+      gameUi.applyPets(state.pets);
       break;
 
     case 'action_result':
@@ -325,10 +382,52 @@ const ACTION_TEXT = {
     },
   },
   pet_lost: { ok: '', fail: { stolen: 'Your pet was stolen' } },
+  rebirth: {
+    ok: 'Rebirth complete',
+    fail: { below_min_speed: 'Not enough speed yet' },
+  },
+  buy_treadmill: {
+    ok: 'Treadmill unlocked for 10 minutes',
+    fail: {
+      not_enough_gems: 'Not enough gems',
+      unknown_treadmill: 'That treadmill does not exist',
+    },
+  },
+  enter_stage: {
+    ok: '',
+    fail: {
+      unknown_stage: 'That stage does not exist',
+      previous_stage_locked: 'Clear the previous stage first',
+      below_min_speed: 'Not enough speed to enter',
+    },
+  },
+  exit_stage: { ok: '', fail: {} },
+  join_room: {
+    ok: '',
+    fail: {
+      room_full: 'That room is full',
+      invalid_room_id: 'Room names use lowercase letters, digits and dashes',
+      server_full: 'No room slots left',
+    },
+  },
+  stage_clear: { ok: 'Stage cleared', fail: {} },
 };
 
 function handleActionResult(msg) {
   const table = ACTION_TEXT[msg.action];
+
+  if (msg.action === 'stage_clear') {
+    hud.toast(msg.firstTime ? 'Stage cleared' : 'Stage replayed', 'good');
+    return;
+  }
+  if (msg.action === 'join_room' && msg.ok) {
+    gameUi.setCurrentRoom(msg.roomId);
+    hud.toast(`Joined ${msg.roomId}`, 'good');
+    // 换房间后本地预测器必须立刻对齐
+    if (predictor && state.lastSelfPos) predictor.snapTo(state.lastSelfPos);
+    return;
+  }
+
   if (msg.ok) {
     if (table?.ok) hud.toast(table.ok, 'good');
     return;
@@ -396,6 +495,13 @@ function handleActionKey(event) {
   } else if (event.code === ACTION_KEYS.hatch) {
     event.preventDefault();
     doHatch();
+  } else if (event.code === 'KeyR') {
+    // 转生由服务器校验门槛,这里直接发请求
+    event.preventDefault();
+    net.send({ type: 'request_rebirth' });
+  } else if (event.code === 'KeyB') {
+    event.preventDefault();
+    gameUi.toggleBag();
   }
 }
 
@@ -468,7 +574,9 @@ function clientLoop() {
   if (net.state === 'open') {
     const snapshot = input.sample();
     net.setInput(snapshot);
+    // 本地预测:只影响画面,判定仍在服务器
     view.predictMotion(dt, snapshot);
+    view.syncPredictedFromPredictor();
     hud.setPing(net.rttMs);
   }
 

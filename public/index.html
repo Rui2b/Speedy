@@ -23,12 +23,23 @@
         <span class="scoreboard-name">Speedy</span>
       </div>
 
+      <!-- 成长数值:全部服务端计算 -->
+      <div class="scoreboard-speed">
+        <span class="speed-value" id="hud-speed">0</span>
+        <span class="speed-label">speed</span>
+        <span class="speed-mult" id="hud-mult">&times;1</span>
+      </div>
+
       <div class="scoreboard-gems">
         <span class="gems-value" id="hud-gems">0</span>
         <span class="gems-label">gems</span>
       </div>
 
       <dl class="scoreboard-meta">
+        <div class="meta-cell">
+          <dt>Rebirth</dt>
+          <dd id="hud-rebirth">0</dd>
+        </div>
         <div class="meta-cell">
           <dt>Online</dt>
           <dd id="hud-online">0</dd>
@@ -44,6 +55,69 @@
       </dl>
     </header>
 
+    <!-- 左侧:房间 / 关卡 / 跑步机 / 重生 -->
+    <aside id="side-panel" class="side-panel" hidden>
+      <section class="panel-block">
+        <h2 class="panel-title">Room</h2>
+        <div class="panel-row">
+          <span class="panel-value" id="current-room">lobby-1</span>
+          <button type="button" class="mini-btn" id="btn-room">Change</button>
+        </div>
+      </section>
+
+      <section class="panel-block">
+        <h2 class="panel-title">Treadmills</h2>
+        <div id="treadmill-list" class="treadmill-list"></div>
+      </section>
+
+      <section class="panel-block">
+        <h2 class="panel-title">Stages</h2>
+        <div id="stage-list" class="stage-list"></div>
+        <button type="button" class="mini-btn wide" id="btn-exit-stage" hidden>Back to lobby</button>
+      </section>
+
+      <section class="panel-block">
+        <button type="button" class="rebirth-btn" id="btn-rebirth">
+          <span class="rebirth-title">Rebirth</span>
+          <span class="rebirth-sub" id="rebirth-sub">Needs 100 speed</span>
+        </button>
+      </section>
+    </aside>
+
+    <!-- 右侧:排行榜 -->
+    <aside id="leaderboard" class="leaderboard" hidden>
+      <h2 class="panel-title">Leaderboard</h2>
+      <ol id="leaderboard-rows" class="leaderboard-rows"></ol>
+    </aside>
+
+    <!-- 背包按钮 -->
+    <button type="button" class="bag-btn" id="btn-bag" hidden>
+      Pets <span class="bag-count" id="bag-count">0</span>
+    </button>
+
+    <!-- 背包面板 -->
+    <div id="bag-panel" class="bag-panel" hidden>
+      <div class="bag-head">
+        <h2 class="panel-title">Your pets</h2>
+        <button type="button" class="mini-btn" id="btn-bag-close">Close</button>
+      </div>
+      <div id="bag-list" class="bag-list"></div>
+    </div>
+
+    <!-- 房间选择 -->
+    <div id="room-panel" class="room-panel" hidden>
+      <div class="bag-head">
+        <h2 class="panel-title">Choose a room</h2>
+        <button type="button" class="mini-btn" id="btn-room-close">Close</button>
+      </div>
+      <div id="room-list" class="room-list"></div>
+      <div class="room-create">
+        <input id="room-input" type="text" maxlength="24" placeholder="room name"
+               pattern="[a-z0-9-]{1,24}" aria-label="Room name" />
+        <button type="button" class="mini-btn" id="btn-room-join">Join</button>
+      </div>
+    </div>
+
     <!-- Pets owned by this player -->
     <div id="hud-pets" class="pets" hidden></div>
 
@@ -55,8 +129,9 @@
     <div id="controls-hint" class="controls" hidden>
       <span class="control"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</span>
       <span class="control"><kbd>Space</kbd> Jump</span>
-      <span class="control"><kbd>E</kbd> Collect or steal</span>
-      <span class="control"><kbd>F</kbd> Hatch</span>
+      <span class="control"><kbd>E</kbd> Collect / steal / hatch</span>
+      <span class="control"><kbd>R</kbd> Rebirth</span>
+      <span class="control"><kbd>B</kbd> Pets</span>
     </div>
 
     <!-- Sign in -->

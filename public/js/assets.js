@@ -38,6 +38,16 @@ export const PALETTE = {
   petHatched: 0x9fd3a5,
   selfRing: 0xe5a84b,
   otherRing: 0x7d766c,
+  /** Obby 平台 */
+  platformSolid: 0x3a352f,
+  platformBlink: 0x8a6a3a,
+  checkpoint: 0x7fb886,
+  goal: 0xe5a84b,
+  /** 玩家拖尾 */
+  trail: 0xe5a84b,
+  /** 蛋 */
+  egg: 0xe8d2a4,
+  eggShell: 0xc9973f,
 };
 
 /** 地图参数。改这里就能改场地大小与密度。 */
