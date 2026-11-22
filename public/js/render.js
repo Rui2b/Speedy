@@ -1,8 +1,8 @@
 /**
- * Three.js scene and rendering.
+ * Three.js 场景与渲染。
  *
- * The client only renders, interpolates and converges to the authoritative
- * position. It never simulates physics or decides who owns a gem.
+ * 客户端只做:渲染、插值平滑、本地预测收敛。
+ * 不做物理、不做资源判定。
  */
 import * as THREE from '/vendor/three/three.module.js';
 import { DEFAULT_SKIN, MAP, PALETTE, SIZES, SKINS } from './assets.js';
@@ -48,7 +48,7 @@ export class GameView {
     this.authoritativeVel = new THREE.Vector3(0, 0, 0);
     this.facing = 0;
 
-    /** Sign-in screen: slow orbit instead of following the player. */
+    /** 登录页:慢速环绕,不跟随玩家 */
     this.attractMode = true;
     this.attractAngle = Math.PI * 0.25;
 
@@ -68,7 +68,7 @@ export class GameView {
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
-    // The canvas has no layout size yet on first paint; measure after it does.
+    // 首次绘制时 canvas 还没有布局尺寸,等布局完成后再量一次
     this.resize();
     requestAnimationFrame(() => this.resize());
     if (typeof ResizeObserver !== 'undefined') {
@@ -78,13 +78,13 @@ export class GameView {
   }
 
   /* ------------------------------------------------------------------ *
-   * Environment
+   * 环境
    * ------------------------------------------------------------------ */
   buildEnvironment() {
     const hemi = new THREE.HemisphereLight(0x9fb2c9, 0x120f0c, MAP.ambientIntensity);
     this.scene.add(hemi);
 
-    // Low dusk key light from one side, like a floodlight
+    // 单侧低位主光,像球场探照灯
     const key = new THREE.DirectionalLight(0xffe6bd, MAP.directionalIntensity);
     key.position.set(-26, 22, 18);
     this.scene.add(key);
@@ -93,7 +93,7 @@ export class GameView {
     rim.position.set(24, 10, -22);
     this.scene.add(rim);
 
-    // Infill surface
+    // 地面
     const ground = new THREE.Mesh(
       new THREE.CircleGeometry(MAP.worldRadius + 4, 96),
       new THREE.MeshStandardMaterial({
@@ -105,8 +105,7 @@ export class GameView {
     ground.rotation.x = -Math.PI / 2;
     this.scene.add(ground);
 
-    // The track itself: a slightly warmer ring of worn surfacing between the
-    // inner infield and the outer boundary.
+    // 跑道本体:内场与外墙之间一圈磨旧的铺装,比地面略暖
     const trackInner = MAP.laneSpacing;
     const trackOuter = MAP.worldRadius - 0.6;
     const track = new THREE.Mesh(
@@ -121,7 +120,7 @@ export class GameView {
     track.position.y = 0.006;
     this.scene.add(track);
 
-    // Lane lines: concentric rings, one in lane paint marks the inner lane
+    // 车道线:同心圆,其中一条用跑道漆(琥珀色)标出
     const laneGroup = new THREE.Group();
     for (let i = 1; i <= MAP.laneCount; i += 1) {
       const radius = i * MAP.laneSpacing;
@@ -143,7 +142,7 @@ export class GameView {
       laneGroup.add(ring);
     }
 
-    // Start line: a short dash across the lanes, like a stagger mark
+    // 起跑线:横跨车道的一小段短线,类似错位起跑标记
     for (let i = 1; i < MAP.laneCount; i += 1) {
       const r = (i + 0.5) * MAP.laneSpacing;
       if (r > MAP.worldRadius) break;
@@ -162,7 +161,7 @@ export class GameView {
       laneGroup.add(dash);
     }
 
-    // Chalk boundary at the outer edge
+    // 外缘的粉笔边界
     const boundary = new THREE.Mesh(
       new THREE.RingGeometry(MAP.worldRadius - 0.42, MAP.worldRadius - 0.12, 128),
       new THREE.MeshBasicMaterial({
@@ -179,7 +178,7 @@ export class GameView {
 
     this.scene.add(laneGroup);
 
-    // Radial tick marks, like lane dividers near the outer edge
+    // 径向刻度,类似外缘附近的车道分隔
     const ticks = new THREE.Group();
     for (let i = 0; i < 32; i += 1) {
       const angle = (i / 32) * Math.PI * 2;
@@ -201,8 +200,8 @@ export class GameView {
     }
     this.scene.add(ticks);
 
-    // Distant floodlights: warm pools of light at the field edge, no fixtures in
-    // frame. They light the outer lane without adding clutter.
+    // 远处探照灯:只在场地边缘留暖色光斑,画面上不出现灯具,
+    // 照亮外圈车道又不添杂物
     for (let i = 0; i < 4; i += 1) {
       const angle = Math.PI / 4 + (i * Math.PI) / 2;
       const px = Math.cos(angle) * (MAP.worldRadius + 5);
@@ -214,7 +213,7 @@ export class GameView {
   }
 
   /* ------------------------------------------------------------------ *
-   * Mesh factories (the place to swap art)
+   * 模型工厂(换美术资源改这里)
    * ------------------------------------------------------------------ */
   createPlayerMesh({ skinId, isSelf }) {
     const skin = SKINS[skinId] ?? SKINS[DEFAULT_SKIN];
@@ -239,7 +238,7 @@ export class GameView {
     head.position.y = body.position.y + SIZES.playerBody.y / 2 + SIZES.playerHead * 0.42;
     group.add(head);
 
-    // A small marker so the facing direction reads at a glance
+    // 一个小鼻尖,方便看出面朝方向
     const nose = new THREE.Mesh(
       new THREE.ConeGeometry(SIZES.playerHead * 0.2, SIZES.playerHead * 0.36, 12),
       new THREE.MeshStandardMaterial({ color: 0xf6f1e6, roughness: 0.5 }),
@@ -273,8 +272,7 @@ export class GameView {
       new THREE.MeshStandardMaterial({
         color: PALETTE.gem,
         emissive: PALETTE.gemGlow,
-        // Gems read as small warm objects, not light sources. The player keeps
-        // the brightest surface in the scene.
+        // 宝石是暖色小物件,不是光源;场上最亮的表面留给玩家自己
         emissiveIntensity: 0.22,
         roughness: 0.35,
         metalness: 0.15,
@@ -346,7 +344,7 @@ export class GameView {
   }
 
   /* ------------------------------------------------------------------ *
-   * State intake
+   * 状态接入
    * ------------------------------------------------------------------ */
   setSelf(uid) {
     this.selfUid = uid;
@@ -485,7 +483,7 @@ export class GameView {
   }
 
   /* ------------------------------------------------------------------ *
-   * Frame
+   * 每帧
    * ------------------------------------------------------------------ */
   start() {
     if (this.running) return;
@@ -531,7 +529,7 @@ export class GameView {
     this.selfGroup.rotation.y = this.facing;
   }
 
-  /** Local prediction: instant visual response, corrected by the server. */
+  /** 本地预测:视觉即时响应,再由服务器纠正 */
   predictMotion(dt, input) {
     if (!this.selfGroup) return;
     const speed = MAP.predictedSpeed;
@@ -597,7 +595,7 @@ export class GameView {
     }
   }
 
-  /** Slow orbit while the sign-in panel is open. */
+  /** 登录面板打开时的慢速环绕。 */
   updateAttractCamera(dt) {
     this.attractAngle += dt * MAP.attract.speed;
     const r = MAP.attract.radius;
@@ -628,6 +626,7 @@ export class GameView {
     const parent = this.canvas.parentElement ?? document.body;
     const width = Math.max(1, parent.clientWidth || window.innerWidth);
     const height = Math.max(1, parent.clientHeight || window.innerHeight);
+    // 尺寸没变就不要反复 setSize,否则每帧都会重建绘制缓冲
     const current = this.renderer.getSize(new THREE.Vector2());
     if (current.x === width && current.y === height && this.camera.aspect === width / height) {
       return;

@@ -1,16 +1,14 @@
 /**
- * Password hashing and session tokens.
+ * 密码哈希与 session token。
  *
- * - Passwords: scrypt (N=16384) with a per-user salt, stored as
- *   "scrypt$N$r$p$salt$hash".
- * - Sessions: a self-contained HMAC signed token,
- *   base64url(payload).base64url(sig). The payload carries uid, jti and an
- *   expiry, so it validates without a database round trip.
+ * - 密码:scrypt(N=16384) + 每用户独立 salt,存成 "scrypt$N$r$p$salt$hash"。
+ * - session:自包含 HMAC 签名 token,格式 base64url(payload).base64url(sig)。
+ *   payload 内含 uid / jti / 过期时间,不依赖数据库即可快速校验。
  */
 import crypto from 'node:crypto';
 import { AUTH } from './config.js';
 
-/** Hash a plain password into a string ready for the database. */
+/** 哈希明文密码,返回可直接入库的字符串。 */
 export function hashPassword(password) {
   const salt = crypto.randomBytes(AUTH.saltBytes);
   const derived = crypto.scryptSync(password, salt, AUTH.keyLen, {
@@ -29,7 +27,7 @@ export function hashPassword(password) {
   ].join('$');
 }
 
-/** Verify a password. timingSafeEqual avoids a timing side channel. */
+/** 校验明文密码。使用 timingSafeEqual 避免时序侧信道。 */
 export function verifyPassword(password, stored) {
   if (typeof stored !== 'string') return false;
   const parts = stored.split('$');
@@ -71,9 +69,9 @@ function sign(data, secret) {
   return crypto.createHmac('sha256', secret).update(data).digest();
 }
 
-/** Issue a session token. */
+/** 生成 session token。 */
 export function issueSessionToken(uid, { ttlMs = AUTH.sessionTtlMs, secret = AUTH.secret } = {}) {
-  if (!secret) throw new Error('SESSION_SECRET is not configured');
+  if (!secret) throw new Error('SESSION_SECRET 未配置');
   const now = Date.now();
   const payload = {
     uid,
@@ -86,7 +84,7 @@ export function issueSessionToken(uid, { ttlMs = AUTH.sessionTtlMs, secret = AUT
 }
 
 /**
- * Validate a session token.
+ * 校验 session token。
  * @returns {{ok: true, payload: object} | {ok: false, reason: string}}
  */
 export function verifySessionToken(token, { secret = AUTH.secret, now = Date.now() } = {}) {
@@ -120,7 +118,7 @@ export function verifySessionToken(token, { secret = AUTH.secret, now = Date.now
   return { ok: true, payload };
 }
 
-/** Minimal cookie parser, so no cookie-parser dependency. */
+/** 简单的 HTTP-only cookie 解析,避免引入 cookie-parser。 */
 export function parseCookies(header) {
   const out = {};
   if (!header) return out;

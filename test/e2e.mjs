@@ -1,16 +1,16 @@
 /**
- * End to end checks that run without a browser.
+ * 端到端自测脚本(不依赖浏览器)。
  *
- * Covers:
- *   1. Register, sign in, session, WebSocket ticket
- *   2. Handshake auth (a missing or forged token must be refused)
- *   3. welcome packet shape
- *   4. Input reporting drives the authoritative position
- *   5. Packet flooding hits the rate limit and the cheat log
- *   6. Teleport detection
- *   7. Gem pickup (a distant gem must be refused)
+ * 覆盖:
+ *   1. 注册 / 登录 / 会话 / WS 票据
+ *   2. WebSocket 握手鉴权(无 token、伪造 token 必须被拒)
+ *   3. welcome 包结构
+ *   4. 输入上报 → self_state 权威坐标变化
+ *   5. 超频发包触发限流与作弊日志
+ *   6. 瞬移作弊检测
+ *   7. 宝石拾取(远距离必须失败)
  *
- * Usage: node test/e2e.mjs [baseUrl]
+ * 用法: node test/e2e.mjs [baseUrl]
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -40,7 +40,7 @@ async function api(path, options = {}) {
   return { status: res.status, body: json, cookies: res.headers.getSetCookie?.() ?? [] };
 }
 
-/** Minimal cookie jar, only the session cookie matters here. */
+/** 极简 cookie jar,只需要 speedy_session */
 function cookieFrom(headers) {
   for (const item of headers || []) {
     const [pair] = item.split(';');
@@ -62,7 +62,7 @@ class Client {
       } catch {
         return;
       }
-      // Hand the packet to a waiter first, so nothing is consumed twice
+      // 优先交给等待者;没人认领才进缓冲区,避免同一条消息被重复消费
       const idx = this.waiters.findIndex((w) => w.predicate(msg));
       if (idx !== -1) {
         const waiter = this.waiters.splice(idx, 1)[0];
@@ -135,7 +135,7 @@ async function main() {
   const userB = `t_b_${suffix}`;
   const password = 'TestPass123';
 
-  /* ---------------------------- 1. Accounts ---------------------------- */
+  /* ---------------------------- 1. 账号 ---------------------------- */
   const regA = await api('/api/register', {
     method: 'POST',
     body: JSON.stringify({ username: userA, password }),
@@ -183,7 +183,7 @@ async function main() {
   const ticketB = await api('/api/ws-ticket', { headers: { Cookie: cookieB } });
   const tokenB = ticketB.body?.token;
 
-  /* --------------------- 2. Handshake authentication -------------------- */
+  /* ------------------------ 2. WS 握手鉴权 ------------------------- */
   let rejectedCode = null;
   await new Promise((resolve) => {
     const bad = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent('forged.token')}`);
@@ -208,7 +208,7 @@ async function main() {
   });
   record('missing token is refused', noTokenCode === 4001, `code=${noTokenCode}`);
 
-  /* ---------------------------- 3. In game ----------------------------- */
+  /* --------------------------- 3. 进游戏 --------------------------- */
   const clientA = await Client.connect(`${WS_BASE}/ws?token=${encodeURIComponent(tokenA)}`, 'A');
   const clientB = await Client.connect(`${WS_BASE}/ws?token=${encodeURIComponent(tokenB)}`, 'B');
 
@@ -218,7 +218,7 @@ async function main() {
 
   const welcomeB = await clientB.waitFor((m) => m.type === 'welcome');
 
-  /* ------------------- 4. Input drives the position -------------------- */
+  /* ------------------------ 4. 输入 → 权威位移 --------------------- */
   let seq = seqStart();
   const startPos = { ...welcomeA.self.pos };
 
@@ -249,9 +249,8 @@ async function main() {
     `moved ${distance.toFixed(2)}, limit ${(6 * (moved / 1000)).toFixed(2)}`,
   );
 
-  // Wait for a snapshot that actually contains A. B's first queued snapshot may
-  // have been sent before A finished attaching, so matching on content is the
-  // only reliable way to assert this.
+  // 等一条真正包含 A 的快照。B 缓冲区里最早那条可能是 A 还没进场时发的,
+  // 所以只能按内容匹配才能稳定断言
   const snapshot = await clientB.waitFor(
     (m) => m.type === 'world_snapshot' && (m.players ?? []).some((p) => p.uid === welcomeA.uid),
     5000,
@@ -263,7 +262,7 @@ async function main() {
   const snapshotB2 = await clientB.waitFor((m) => m.type === 'world_snapshot', 3000);
   record('snapshot excludes the receiver', !snapshotB2.players.some((p) => p.uid === welcomeB.uid));
 
-  /* ----------------------- 5. Gem pickup checks ----------------------- */
+  /* ------------------------ 5. 宝石拾取校验 ----------------------- */
   const gems = snapshot.gems;
   const farGem = gems.find((g) => {
     const d = Math.hypot(g.pos.x - lastSelf.pos.x, g.pos.z - lastSelf.pos.z);
@@ -285,7 +284,7 @@ async function main() {
     `reason=${invalidGem.reason}`,
   );
 
-  /* --------------------- 6. Protocol field validation ----------------- */
+  /* ------------------------ 6. 协议字段校验 ----------------------- */
   clientA.send({
     type: 'player_input',
     seq: 1,
@@ -299,7 +298,7 @@ async function main() {
   const badJump = await clientA.waitFor((m) => m.type === 'error', 3000);
   record('missing jump field is refused', badJump.code === 'bad_input_jump', `code=${badJump.code}`);
 
-  /* --------------------- 7. Teleport detection ------------------------ */
+  /* ------------------------ 7. 瞬移作弊检测 ----------------------- */
   clientA.send({
     type: 'player_input',
     seq: 100000,
@@ -317,7 +316,7 @@ async function main() {
     `server position is ${cheatDistance.toFixed(2)} from origin`,
   );
 
-  /* ------------------------ 8. Rate limiting -------------------------- */
+  /* ------------------------ 8. 超频限流 --------------------------- */
   const rateSeq = 200000;
   for (let i = 0; i < 40; i += 1) {
     clientA.send({
@@ -331,7 +330,7 @@ async function main() {
   const closed = await clientA.waitClose(4000).catch(() => ({ code: -1 }));
   record('flooding inputs closes the connection', closed.code === 4002 || closed.code === 4003, `code=${closed.code}`);
 
-  /* --------------------------- Wrap up -------------------------------- */
+  /* --------------------------- 收尾 ------------------------------ */
   clientB.close();
 
   const health = await api('/api/health');
@@ -341,13 +340,13 @@ async function main() {
   console.log('');
   console.log(`${results.length - failed.length}/${results.length} passed`);
   if (failed.length > 0) {
-    console.log('Failures:');
+    console.log('失败项:');
     for (const item of failed) console.log(`  - ${item.name} (${item.info ?? ''})`);
     process.exitCode = 1;
   }
 }
 
 main().catch((err) => {
-  console.error('Test crashed:', err);
+  console.error('测试异常:', err);
   process.exitCode = 1;
 });

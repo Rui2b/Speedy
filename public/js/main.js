@@ -1,9 +1,8 @@
 /**
- * Client entry: sign in, connect, render loop.
+ * 客户端主流程:登录 → 连接 → 渲染循环。
  *
- * The page never reloads. One WebSocket is opened per session and reconnects
- * internally; the render loop keeps running behind the sign-in panel so the
- * field is visible before anyone signs in.
+ * 页面加载后不刷新;每个会话只开一条 WebSocket,断线内部重连。
+ * 渲染循环在登录面板背后也一直跑着,所以还没登录就能看到场地。
  */
 
 import { GameView } from './render.js';
@@ -26,7 +25,7 @@ const el = {
 };
 
 const state = {
-  /** Short lived WS ticket. Kept in memory only, never in localStorage. */
+  /** 短期 WS 票据,只放内存,不落 localStorage(避免 XSS 偷取) */
   wsToken: null,
   uid: null,
   gems: 0,
@@ -53,12 +52,12 @@ const net = new NetClient({
 });
 
 /* ------------------------------------------------------------------------- *
- * Startup
+ * 启动
  * ------------------------------------------------------------------------- */
 boot();
 
 async function boot() {
-  // The field runs behind the sign-in panel from the first frame.
+  // 从第一帧开始,场地就在登录面板背后跟着跑。
   view.start();
 
   setLoading(true, 'Restoring your session');
@@ -74,14 +73,14 @@ async function boot() {
       }
     }
   } catch {
-    /* Fall through to the sign-in form */
+    /* 网络异常时退回登录 */
   }
   setLoading(false);
   showLogin();
 }
 
 /* ------------------------------------------------------------------------- *
- * Sign in and registration
+ * 登录 / 注册
  * ------------------------------------------------------------------------- */
 function showLogin() {
   el.overlay.hidden = false;
@@ -148,7 +147,7 @@ async function submitAuth(mode) {
   }
 }
 
-/** Fetch a short lived ticket for the WebSocket handshake. */
+/** 从服务端取一个短期 WS 票据,cookie 是唯一凭据。 */
 async function obtainWsTicket() {
   try {
     const res = await fetch('/api/ws-ticket', { credentials: 'same-origin' });
@@ -158,7 +157,7 @@ async function obtainWsTicket() {
       state.wsToken = data.token;
     }
   } catch {
-    /* The handshake falls back to the session cookie */
+    /* 失败时退化为 cookie 握手 */
   }
 }
 
@@ -177,7 +176,7 @@ el.form.addEventListener('submit', (event) => {
 el.btnRegister.addEventListener('click', () => submitAuth('register'));
 
 /* ------------------------------------------------------------------------- *
- * Entering the game
+ * 进入游戏
  * ------------------------------------------------------------------------- */
 function startGame() {
   if (state.starting) return;
@@ -191,7 +190,7 @@ function startGame() {
 
   net.connect();
 
-  // Blur the active field so Chromebooks do not raise the on-screen keyboard
+  // 防止 Chromebook 上弹出软键盘
   document.activeElement?.blur?.();
 
   window.addEventListener('keydown', handleActionKey);
@@ -204,7 +203,7 @@ function setLoading(show, text) {
 }
 
 /* ------------------------------------------------------------------------- *
- * Server messages
+ * 服务器消息
  * ------------------------------------------------------------------------- */
 function handleServerMessage(msg) {
   switch (msg.type) {
@@ -331,7 +330,7 @@ function errorText(code) {
 }
 
 /* ------------------------------------------------------------------------- *
- * Connection state
+ * 连接状态
  * ------------------------------------------------------------------------- */
 function handleConnectionState(nextState, info) {
   switch (nextState) {
@@ -363,7 +362,7 @@ function handleConnectionState(nextState, info) {
 }
 
 /* ------------------------------------------------------------------------- *
- * Action keys
+ * 操作按键
  * ------------------------------------------------------------------------- */
 function handleActionKey(event) {
   if (!input.enabled) return;
@@ -413,7 +412,7 @@ function doHatch() {
 }
 
 /* ------------------------------------------------------------------------- *
- * Read-only snapshot for automated checks
+ * 只读调试钩子(便于自动化测试与排查)
  * ------------------------------------------------------------------------- */
 if (typeof window !== 'undefined') {
   window.__speedy = {
@@ -433,7 +432,7 @@ if (typeof window !== 'undefined') {
 }
 
 /* ------------------------------------------------------------------------- *
- * Input bridge: sampling and local prediction
+ * 主循环桥接:输入 → 网络 + 本地预测
  * ------------------------------------------------------------------------- */
 const FRAME = { last: performance.now(), fpsAccum: 0, fpsFrames: 0 };
 
@@ -449,6 +448,7 @@ function clientLoop() {
     hud.setPing(net.rttMs);
   }
 
+  // 帧率统计
   FRAME.fpsAccum += dt;
   FRAME.fpsFrames += 1;
   if (FRAME.fpsAccum >= 0.5) {

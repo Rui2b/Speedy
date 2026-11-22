@@ -1,17 +1,17 @@
-# Speedy systemd unit.
+# Speedy 的 systemd 单元。
 #
-# systemd is used instead of PM2 because PM2 is AGPL-3.0, which conflicts with
-# this project's rule of no copyleft dependencies. systemd gives the same
-# boot-on-start, crash-restart and journald logging.
+# 选择 systemd 而不是 PM2 的原因:PM2 采用 AGPL-3.0,与本方案
+# "不得引入 GPL 强传染依赖"的硬约束冲突。systemd 是系统自带组件,
+# 同样提供开机自启、崩溃自动重启、日志收集。
 #
-# Install with deploy/install.sh.
+# 安装步骤见 deploy/install.sh。
 
 [Unit]
 Description=Speedy authoritative game server
 Documentation=file:///opt/speedy/README.md
 After=network-online.target docker.service
 Wants=network-online.target
-# Restart budget, so a broken build cannot spin forever
+# 崩溃重启上限,避免无限重启风暴
 StartLimitIntervalSec=60
 StartLimitBurst=10
 
@@ -24,23 +24,25 @@ EnvironmentFile=/opt/speedy/.env
 Environment=NODE_ENV=production
 ExecStart=/usr/local/bin/node server/index.js
 
+# 崩溃自动重启
 Restart=always
 RestartSec=3
 
-# Graceful shutdown: SIGTERM first, SIGKILL only after 20s
+# 优雅退出:先 SIGTERM,等 20 秒仍未退出再 SIGKILL
 KillSignal=SIGTERM
 TimeoutStopSec=20
 
+# 日志走 journald,配合 `journalctl -u speedy -f` 查看
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=speedy
 
-# --- Hardening ---
+# --- 安全加固 ---
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Only the log directory is writable
+# 只允许写日志与临时目录
 ReadWritePaths=/opt/speedy/logs
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -48,7 +50,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Ceiling so one process cannot eat the whole small instance
+# 资源上限,避免单进程吃满 Always Free 小机器
 MemoryMax=512M
 TasksMax=256
 

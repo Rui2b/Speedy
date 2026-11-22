@@ -1,10 +1,9 @@
 /**
- * PostgreSQL persistence.
+ * PostgreSQL 存档层。
  *
- * Called only on connect, disconnect, gem pickup and pet changes. Never per
- * tick. To keep write volume down, gem pickups accumulate as dirty counters
- * and land in batches (see flushInventory), so several pickups by one player
- * become a single UPDATE.
+ * 只在上线/下线/拾取宝石/宠物变更时调用,绝不每 tick 写入。
+ * 为了降低写入频率,宝石拾取采用"脏标记 + 定时批量落库"的方式
+ * (见 flushInventory),同一个玩家多次拾取只产生一次 UPDATE。
  */
 import pg from 'pg';
 import { DB, AUTH, RULES, isProduction } from './config.js';
@@ -13,13 +12,13 @@ import { createLogger } from './logger.js';
 const log = createLogger('store');
 const { Pool } = pg;
 
-/** Fallback used when DATABASE_URL is missing, so the client can be worked on alone. */
+/** 未配置 DATABASE_URL 时使用的空实现,方便本地纯前端调试。 */
 class NullStore {
   constructor() {
     this.enabled = false;
   }
   async init() {
-    log.warn('DATABASE_URL is not set, running without persistence (memory only)');
+    log.warn('未配置 DATABASE_URL,存档功能关闭(仅内存模式)');
   }
   async createUser() {
     throw new Error('database_unavailable');
@@ -56,15 +55,15 @@ export class PgStore {
       application_name: 'speedy-game',
     });
     this.pool.on('error', (err) => {
-      log.error('idle connection failed', { message: err.message });
+      log.error('空闲连接异常', { message: err.message });
     });
-    /** uid -> pending increment, { gems: number } */
+    /** uid -> 待落库的增量,{ gems: number } */
     this.dirtyInventory = new Map();
   }
 
   async init() {
     await this.pool.query('SELECT 1');
-    log.info('connected to PostgreSQL');
+    log.info('PostgreSQL 连接成功');
     if (DB.autoMigrate) {
       const { readFile } = await import('node:fs/promises');
       const { fileURLToPath } = await import('node:url');
@@ -72,11 +71,11 @@ export class PgStore {
       const here = path.dirname(fileURLToPath(import.meta.url));
       const sql = await readFile(path.join(here, '..', 'db', 'init.sql'), 'utf8');
       await this.pool.query(sql);
-      log.info('schema ready');
+      log.info('存档表结构已就绪');
     }
   }
 
-  /* ----------------------------- Accounts ------------------------------ */
+  /* ----------------------------- 账号 ---------------------------------- */
 
   async createUser({ username, passwordHash, displayName }) {
     const client = await this.pool.connect();
@@ -109,7 +108,7 @@ export class PgStore {
     }
   }
 
-  /** Returns the raw row including password_hash; the caller verifies the password. */
+  /** 返回包含 password_hash 的原始行,由调用方校验密码。 */
   async findUserByUsername(username) {
     const { rows } = await this.pool.query(
       `SELECT uid, username, password_hash, display_name, equipped_skin
@@ -138,7 +137,7 @@ export class PgStore {
     await this.pool.query('UPDATE users SET last_seen_at = now() WHERE uid = $1', [uid]);
   }
 
-  /* ----------------------------- Save data ----------------------------- */
+  /* ----------------------------- 存档 ---------------------------------- */
 
   async loadProfile(uid) {
     const [inv, pets] = await Promise.all([
@@ -164,7 +163,7 @@ export class PgStore {
     };
   }
 
-  /** Flush accumulated gem increments. index.js calls this every 5 seconds. */
+  /** 把内存中累积的宝石增量攒批写入。index.js 每 5 秒调用一次。 */
   markGemPickup(uid, amount) {
     const cur = this.dirtyInventory.get(uid) ?? 0;
     this.dirtyInventory.set(uid, cur + amount);
@@ -189,18 +188,18 @@ export class PgStore {
         [uids, amounts],
       );
     } catch (err) {
-      // On failure put the increments back so the next cycle retries them
+      // 落库失败时把增量放回去,下个周期重试,避免丢数据
       for (const [uid, amount] of entries) {
         const cur = this.dirtyInventory.get(uid) ?? 0;
         this.dirtyInventory.set(uid, cur + amount);
       }
-      log.error('batch inventory write failed', { message: err.message });
+      log.error('批量写入库存失败', { message: err.message });
     }
   }
 
-  /* ------------------------------- Pets -------------------------------- */
+  /* ----------------------------- 宠物 ---------------------------------- */
 
-  /** Insert a pet owned by a player (hatched, or granted at spawn). */
+  /** 新建一只归属某玩家的宠物(孵化完成或初始赠送)。 */
   async upsertOwnedPet({ petId, ownerUid, species, rarity, hatchProgress, isHatched }) {
     const { rows } = await this.pool.query(
       `INSERT INTO pets (pet_id, owner_uid, species, rarity, hatch_progress, is_hatched, created_at)
@@ -216,9 +215,8 @@ export class PgStore {
   }
 
   /**
-   * Transfer pet ownership.
-   * @returns {Promise<boolean>} true when the transfer landed; a mismatched
-   *   current owner fails
+   * 转移宠物所有权。
+   * @returns {Promise<boolean>} 是否真的转移成功(原主人不匹配则失败)
    */
   async transferPet({ petId, fromUid, toUid }) {
     const client = await this.pool.connect();
@@ -248,7 +246,7 @@ export class PgStore {
       return true;
     } catch (err) {
       await client.query('ROLLBACK');
-      log.error('pet transfer failed', { message: err.message });
+      log.error('转移宠物失败', { message: err.message });
       return false;
     } finally {
       client.release();
@@ -297,21 +295,21 @@ export function getStore() {
 
   if (!DB.url) {
     if (isProduction) {
-      throw new Error('DATABASE_URL is required in production');
+      throw new Error('生产模式必须配置 DATABASE_URL');
     }
     singleton = new NullStore();
     return singleton;
   }
 
   if (!AUTH.secret) {
-    throw new Error('SESSION_SECRET is required');
+    throw new Error('必须配置 SESSION_SECRET');
   }
 
   singleton = new PgStore(DB.url);
   return singleton;
 }
 
-/** Test only: drop the singleton. */
+/** 仅供测试使用:重置单例。 */
 export function resetStoreForTests() {
   singleton = null;
 }

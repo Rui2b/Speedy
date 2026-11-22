@@ -1,19 +1,21 @@
-# cloudflared configuration for the Speedy origin.
+# Speedy 游戏源站的 cloudflared 配置(独立于 1Panel 使用的实例)
 #
-# This tunnel ("speedy-game") is separate from the one the control panel uses.
-# Its ingress rules are managed on the Cloudflare side (remote config):
-#   speedy-origin.<your-domain>  ->  http://127.0.0.1:8080
-# Change ingress in the dashboard or through the API, not here, or the local
-# file and the remote config will disagree.
+# 该 tunnel(speedy-game)只暴露一个主机名,由 Cloudflare 边缘代管配置,
+# 本文件仅提供凭证与运行参数。
+#
+# 注意:tunnel 的 ingress 规则在 Cloudflare 侧(remote config)管理:
+#   speedy-origin.potatoedu.cc → http://127.0.0.1:8080
+# 修改 ingress 请用 Dashboard 或 API,不要在这里加,否则会与远端配置冲突。
 
 tunnel: 09437374-4836-4680-a7d0-1141c1c19129
-credentials-file: /etc/cloudflared/speedy-game.json
+credentials-file: /etc/cloudflared/speedy-game.token
 
-# Set this to debug while troubleshooting
+# 日志级别:出问题时改成 debug
 loglevel: info
-# Metrics stay on loopback: curl 127.0.0.1:20242/metrics
+# 指标端点只监听本机,便于 `curl 127.0.0.1:20242/metrics` 观察连接
 metrics: 127.0.0.1:20242
 
+# 连接复用与重试
 retries: 5
 grace-period: 30s
 

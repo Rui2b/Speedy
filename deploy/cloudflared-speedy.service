@@ -1,5 +1,5 @@
 [Unit]
-Description=Cloudflare Tunnel for the Speedy game origin
+Description=Cloudflare Tunnel for Speedy game origin (speedy-origin.potatoedu.cc)
 Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 After=network-online.target speedy.service
 Wants=network-online.target
@@ -7,11 +7,11 @@ Wants=network-online.target
 [Service]
 Type=notify
 TimeoutStartSec=30
-# Separate from the cloudflared instance the control panel uses
+# 独立于 1Panel 使用的 cloudflared 实例,互不影响
 ExecStart=/usr/bin/cloudflared --no-autoupdate --config /etc/cloudflared/speedy-game.yml tunnel run
 Restart=always
 RestartSec=5s
-# Carries public traffic, keep the OOM killer away from it
+# 承载公网流量,不要被 OOM killer 优先干掉
 OOMScoreAdjust=-500
 
 [Install]

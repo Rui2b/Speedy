@@ -1,6 +1,6 @@
 /**
- * HUD: gem count, online players, ping, frame rate, pets owned.
- * Pure DOM, decoupled from the render loop.
+ * HUD:宝石数、在线人数、延迟、帧率、已拥有的宠物。
+ * 纯 DOM 操作,和渲染循环解耦。
  */
 export class Hud {
   constructor() {
@@ -51,7 +51,7 @@ export class Hud {
     this.el.fps.textContent = String(Math.round(fps));
   }
 
-  /** Rebuild the pet list only when the data actually changed. */
+  /** 只在内容变化时重建宠物列表 DOM。 */
   setPets(pets) {
     const list = Array.isArray(pets) ? pets : [];
     const key = list.map((p) => `${p.petId}:${p.hatchProgress}:${p.isHatched}`).join('|');

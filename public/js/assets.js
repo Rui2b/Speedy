@@ -1,14 +1,14 @@
 /**
- * Art assets and map configuration, kept apart from logic.
+ * 美术资源与地图配置(与逻辑分离)。
  *
- * The world is a school running track at dusk: dark asphalt, concentric lane
- * paint, chalk marks. Colours here are the ones the 3D field uses, so the
- * interface chrome can stay neutral and let the field carry the colour.
+ * 世界是一圈黄昏的学校跑道:深色沥青、同心车道漆、粉笔标记。
+ * 这里定义的颜色就是 3D 场地用的颜色,所以界面本身保持中性,
+ * 让场地去承载色彩。
  *
- * To reskin, change values in this file only.
+ * 想换皮肤贴图 / 地图模型 / 配色,只改这个文件。
  */
 
-/** Skins: body colour plus a trim colour. Add a texture map when you have one. */
+/** 皮肤定义:主体色 + 描边色(贴图留空则使用纯色)。 */
 export const SKINS = {
   classic: { body: 0xd9d3c6, accent: 0xe5a84b, map: null },
   sprout: { body: 0xb9c9a4, accent: 0x8fae74, map: null },
@@ -20,12 +20,12 @@ export const SKINS = {
 
 export const DEFAULT_SKIN = 'classic';
 
-/** Scene colours. Warm ink ramp, amber lane paint. */
+/** 场景配色:暖墨色系 + 琥珀跑道漆。 */
 export const PALETTE = {
   sky: 0x14120f,
   fog: 0x14120f,
   ground: 0x24211d,
-  /** Worn track surfacing between the infield and the boundary */
+  /** 内场与外缘之间磨旧的跑道铺装 */
   track: 0x312c26,
   groundEdge: 0x2a2724,
   lane: 0x6f6659,
@@ -40,19 +40,19 @@ export const PALETTE = {
   otherRing: 0x7d766c,
 };
 
-/** Map parameters. Change these to change the field. */
+/** 地图参数。改这里就能改场地大小与密度。 */
 export const MAP = {
-  /** Track radius in metres. Must match GAME.worldRadius on the server. */
+  /** 场地半径(米),必须与服务器 GAME.worldRadius 保持一致 */
   worldRadius: 40,
-  /** How many painted lanes to draw */
+  /** 画多少条车道 */
   laneCount: 6,
-  /** Lane line thickness in metres */
+  /** 车道线宽度(米) */
   laneWidth: 0.16,
-  /** Spacing between lane centre lines in metres */
+  /** 车道中心线间距(米) */
   laneSpacing: 5.4,
   ambientIntensity: 1.05,
   directionalIntensity: 1.5,
-  /** Local prediction speed (visual only; the server owns the real speed) */
+  /** 本地预测速度(仅视觉,真实速度由服务器决定) */
   predictedSpeed: 6,
   camera: {
     distance: 13,
@@ -60,17 +60,17 @@ export const MAP = {
     lookAhead: 2.4,
     lerpRate: 9,
   },
-  /** Slow orbit used behind the sign-in panel */
+  /** 登录面板背后的慢速环绕参数 */
   attract: {
     radius: 30,
     height: 15,
     speed: 0.028,
-    /** Look slightly past the centre so the lanes sweep across the frame */
+    /** 视线略微越过中心,让车道横扫画面 */
     focus: { x: 0, y: 0.6, z: -6 },
   },
 };
 
-/** Model sizes in metres. */
+/** 模型尺寸(单位 = 米) */
 export const SIZES = {
   playerBody: { x: 0.85, y: 1.15, z: 0.85 },
   playerHead: 0.52,
@@ -80,7 +80,7 @@ export const SIZES = {
   ringOuter: 0.92,
 };
 
-/** Audio slots. Replace with real files when you have them. */
+/** 音效留白:后续可替换成真实音频文件。 */
 export const SOUNDS = {
   pickup: null,
   steal: null,

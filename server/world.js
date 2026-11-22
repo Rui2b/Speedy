@@ -1,10 +1,9 @@
 /**
- * World state and authoritative physics.
+ * 世界状态与权威物理模拟。
  *
- * - Live positions and velocities only exist in memory maps. Nothing is
- *   written per tick.
- * - The client reports inputs; positions are computed here.
- * - Snapshots go out at 10Hz, driven by the tick counter.
+ * - 在线玩家位置/速度只放在内存 Map,绝不每 tick 写数据库。
+ * - 客户端只上报输入,位置由这里算。
+ * - 广播降频到 10Hz,由 tick 计数控制。
  */
 import crypto from 'node:crypto';
 import {
@@ -23,7 +22,7 @@ function randomInDisc(radius) {
   return { x: Math.cos(angle) * dist, z: Math.sin(angle) * dist };
 }
 
-/** Shared idle input, so the tick loop allocates nothing */
+/** 复用的空输入常量,避免每 tick 分配对象 */
 const IDLE_INPUT = Object.freeze({ moveX: 0, moveZ: 0, jump: false });
 
 export function clampToWorld(x, z) {
@@ -37,7 +36,7 @@ export function normalizeSkin(skinId) {
   return VALID_SKINS.includes(skinId) ? skinId : VALID_SKINS[0];
 }
 
-/** Build a runtime player state. The spawn is server chosen, never client supplied. */
+/** 创建一个玩家运行时状态。位置由服务器分配,不信任客户端。 */
 export function createPlayerState({ uid, displayName, skinId, gems }) {
   const spawn = randomInDisc(GAME.spawnRadius);
   return {
@@ -47,42 +46,41 @@ export function createPlayerState({ uid, displayName, skinId, gems }) {
     pos: { x: spawn.x, y: PHYSICS.groundY, z: spawn.z },
     vel: { x: 0, y: 0, z: 0 },
     onGround: true,
-    /** Most recent input, extrapolated when a packet is missing */
+    /** 最近一次输入,缺包时用于外推 */
     lastInput: { moveX: 0, moveZ: 0, jump: false },
-    /** Timestamp of the last input packet, used to expire stale input */
+    /** 最近一次收到输入包的时间戳,用于判定输入是否已过期 */
     lastInputAt: 0,
-    /** Last accepted seq, so out-of-order and duplicate packets are dropped */
+    /** 最近一次收到的 seq,用于丢弃乱序/重复包 */
     lastSeq: -1,
-    /** Total input packets accepted */
+    /** 服务器一共接受了多少个输入包 */
     ackedInputs: 0,
-    /** Gem count (authoritative) */
+    /** 持有宝石总数(权威值) */
     gems: Number.isFinite(gems) ? gems : 0,
-    /** Pet ids owned by this player */
+    /** 已拥有的宠物 id 集合 */
     petIds: new Set(),
-    /** petId -> next allowed action timestamp */
+    /** petId -> 下次可操作时间戳 */
     petCooldowns: new Map(),
-    /** Accumulated anti-cheat strikes */
+    /** 累计作弊计次 */
     strikes: 0,
-    /** Previous reported position and time, used for teleport detection */
+    /** 上一次客户端预览坐标与时间,用于瞬移检测 */
     lastPreview: null,
     lastPreviewAt: 0,
     displacementStreak: 0,
     driftStreak: 0,
-    /** Rate limit window */
+    /** 限流窗口 */
     rate: { windowStart: 0, inputCount: 0, actionCount: 0 },
   };
 }
 
 /**
- * Authoritative integration for one player. dt is in seconds.
- * Horizontally the input sets a target velocity, acceleration approaches it
- * and friction damps it. Vertically a jump impulse plus gravity applies, and
- * landing is clamped to the ground plane.
+ * 单个玩家的权威积分。dt 单位为秒。
+ * 水平方向:输入决定目标速度,加速度逼近,摩擦衰减。
+ * 垂直方向:跳跃冲量 + 重力,落地钳制在地面。
  */
 export function integratePlayer(player, input, dt) {
   const { maxSpeed, acceleration, friction, jumpImpulse, gravity, groundY, airControl } = PHYSICS;
 
-  // Normalize input so diagonal movement is not faster (square to circle)
+  // 输入归一化:防止斜向移动速度更快(正方形输入 → 圆形)
   let ix = Number(input.moveX);
   let iz = Number(input.moveZ);
   if (!Number.isFinite(ix)) ix = 0;
@@ -103,7 +101,7 @@ export function integratePlayer(player, input, dt) {
     player.vel.x = approach(player.vel.x, targetVx, acceleration * control * dt);
     player.vel.z = approach(player.vel.z, targetVz, acceleration * control * dt);
   } else if (player.onGround) {
-    // No input: damp by friction, raised to a tick-based power so any dt behaves the same
+    // 无输入:按摩擦衰减(以 tick 为基准做幂运算,保证不同 dt 下表现一致)
     const decay = Math.pow(friction, dt * TIMING.tickRate);
     player.vel.x *= decay;
     player.vel.z *= decay;
@@ -111,14 +109,14 @@ export function integratePlayer(player, input, dt) {
     if (Math.abs(player.vel.z) < 0.05) player.vel.z = 0;
   }
 
-  // Hard speed clamp, so float drift cannot exceed the limit
+  // 硬性限速,防止浮点累积越界
   const speed = Math.hypot(player.vel.x, player.vel.z);
   if (speed > maxSpeed) {
     player.vel.x = (player.vel.x / speed) * maxSpeed;
     player.vel.z = (player.vel.z / speed) * maxSpeed;
   }
 
-  // Vertical motion
+  // 垂直运动
   if (input.jump === true && player.onGround) {
     player.vel.y = jumpImpulse;
     player.onGround = false;
@@ -146,7 +144,7 @@ function approach(current, target, maxDelta) {
   return current + Math.sign(diff) * maxDelta;
 }
 
-/** Maximum allowed displacement for one tick, used as the anti-cheat threshold. */
+/** 本 tick 允许的最大位移距离(米),用于防作弊阈值。 */
 export function maxDisplacementPerTick(dt) {
   const horizontal = PHYSICS.maxSpeed * dt;
   const vertical = PHYSICS.jumpImpulse * dt;
@@ -174,7 +172,7 @@ function shuffle(array) {
 }
 
 /* ------------------------------------------------------------------------- *
- * The world, in memory
+ * 世界(内存)
  * ------------------------------------------------------------------------- */
 export class World {
   constructor() {
@@ -213,16 +211,16 @@ export class World {
         isHatched: false,
         species: 'blob',
         rarity: 'common',
-        /** Steal cooldown: a freshly stolen pet is protected for a while */
+        /** 抢夺冷却时间戳:被偷后进入保护期,期间任何人不能再次抢夺 */
         stealCooldownUntil: 0,
-        /** When this pet was last stolen, for validation and display */
+        /** 该宠物上次被偷的时间戳,用于校验与展示 */
         lastStolenAt: 0,
       };
       this.pets.set(pet.petId, pet);
     }
   }
 
-  /** Attach a player's persisted pets to the world on connect. */
+  /** 把玩家已持久化的宠物挂进世界(上线时调用)。 */
   attachPersistedPets(player, pets) {
     for (const record of pets) {
       let pet = this.pets.get(record.petId);
@@ -266,12 +264,12 @@ export class World {
     return this.players.get(uid) ?? null;
   }
 
-  /** Advance one tick. */
+  /** 推进一个 tick。 */
   step(dt, now) {
     this.tick += 1;
 
     for (const player of this.players.values()) {
-      // Expired input: a client that stops reporting must not keep sliding
+      // 输入过期:客户端停发或掉线时不能让角色一直往前跑
       const stale = now - player.lastInputAt > TIMING.inputStaleMs;
       const input = stale ? IDLE_INPUT : player.lastInput;
       integratePlayer(player, input, dt);
@@ -285,7 +283,7 @@ export class World {
     }
   }
 
-  /** Build a downlink snapshot. The receiver is left out of the player list. */
+  /** 生成下行快照。players 中排除接收者自己(方案要求只发给其他玩家)。 */
   buildSnapshot(excludeUid) {
     const players = [];
     for (const player of this.players.values()) {
@@ -317,7 +315,7 @@ export class World {
     return { players, gems, pets };
   }
 
-  /** Roster, sent only when someone joins or leaves rather than every frame. */
+  /** 玩家名单(仅加入/离开时广播,避免每帧刷名字)。 */
   buildRoster() {
     const roster = [];
     for (const player of this.players.values()) {
@@ -326,7 +324,7 @@ export class World {
     return roster;
   }
 
-  /** Nearest collectable gem within a radius. */
+  /** 找到距离某点最近的、在半径内且可拾取的宝石。 */
   findGemNear(pos, radius) {
     let best = null;
     let bestDist = Infinity;

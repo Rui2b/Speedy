@@ -1,7 +1,7 @@
 /**
- * Create the tables from the command line.
+ * 建表脚本(本地/CI 用)。
  *
- * Usage:
+ * 用法:
  *   DATABASE_URL=postgres://user:pass@host:5432/db node scripts/init-db.js
  */
 import fs from 'node:fs/promises';
@@ -13,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const url = process.env.DATABASE_URL;
 
 if (!url) {
-  console.error('Set the DATABASE_URL environment variable first');
+  console.error('请设置 DATABASE_URL 环境变量');
   process.exit(1);
 }
 
@@ -27,10 +27,10 @@ try {
     `SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' ORDER BY table_name`,
   );
-  console.log('Tables present:');
+  console.log('已创建/确认的表:');
   for (const row of rows) console.log(`  - ${row.table_name}`);
 } catch (err) {
-  console.error('Schema creation failed:', err.message);
+  console.error('建表失败:', err.message);
   process.exitCode = 1;
 } finally {
   await client.end();

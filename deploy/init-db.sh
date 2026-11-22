@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Database bootstrap: create the database, then apply the schema.
+# 初始化数据库(建库 + 建表)
 #
-# Assumes PostgreSQL runs in Docker, which is the case on this host.
-# Idempotent, safe to re-run.
+# 适用:PostgreSQL 跑在 Docker 容器里(本机实际情况)。
+# 幂等:可重复执行。
 #
-# Usage:
+# 用法:
 #   sudo bash deploy/init-db.sh
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -16,25 +16,25 @@ PG_DB=${PG_DB:-speedy}
 SQL_FILE=${1:-$(cd "$(dirname "$0")/.." && pwd)/db/init.sql}
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-  echo "Container ${CONTAINER} not found" >&2
+  echo "容器 ${CONTAINER} 不存在" >&2
   exit 1
 fi
 
-echo "==> Checking database ${PG_DB}"
+echo "==> 检查数据库 ${PG_DB}"
 EXISTS=$(docker exec -i "$CONTAINER" psql -U "$PG_USER" -d postgres -tAc \
   "SELECT 1 FROM pg_database WHERE datname = '${PG_DB}'")
 
 if [[ "$EXISTS" != "1" ]]; then
-  echo "==> Creating database ${PG_DB}"
+  echo "==> 创建数据库 ${PG_DB}"
   docker exec -i "$CONTAINER" psql -U "$PG_USER" -d postgres -c \
     "CREATE DATABASE \"${PG_DB}\" OWNER \"${PG_USER}\""
 else
-  echo "    already present, skipping"
+  echo "    已存在,跳过创建"
 fi
 
-echo "==> Applying schema ${SQL_FILE}"
+echo "==> 应用表结构 ${SQL_FILE}"
 docker exec -i "$CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 < "$SQL_FILE"
 
-echo "==> Tables"
+echo "==> 表清单"
 docker exec -i "$CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c '\dt'
-echo "Done"
+echo "完成"

@@ -1,7 +1,7 @@
 /**
- * Two player checks: stealing, cooldown, ownership and the stolen notification.
+ * 双人玩法测试:偷宠物、冷却、权限,以及宠物被偷后的通知。
  *
- * Usage: node test/multiplayer.mjs [baseUrl]
+ * 用法: node test/multiplayer.mjs [baseUrl]
  */
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';
@@ -16,8 +16,8 @@ function check(name, ok, info) {
 }
 
 /**
- * Test helper that grants a pet by talking to the database directly, so the
- * server carries no test-only endpoint. Skipped when DATABASE_URL is unset.
+ * 测试专用的"发宠物"辅助:直连数据库,不在服务端留任何后门。
+ * 未配置 DATABASE_URL 时跳过相关用例。
  */
 async function grantPet(uid) {
   const url = process.env.DATABASE_URL;
@@ -85,7 +85,7 @@ class Peer {
       peer.ws = ws;
       ws.on('message', (raw) => {
         const msg = JSON.parse(raw.toString());
-        // Answer the server heartbeat, or an idle peer gets dropped
+        // 必须回应服务器心跳,否则空闲期间会被判定为死连接
         if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong', t: msg.t }));
           return;
@@ -140,16 +140,14 @@ class Peer {
     this.ws.send(JSON.stringify(payload));
   }
 
-  /** Discard queued messages matching a predicate, so a stale result cannot be
-   *  mistaken for the answer to the next request. */
+  /** 丢弃已排队的消息,避免把上一次的旧结果当成这次请求的回应。 */
   drain(predicate) {
     this.queue = this.queue.filter((m) => !predicate(m));
   }
 
   /**
-   * Walk toward a point until the authoritative position is inside radius, then
-   * send a stop input and wait for the server to settle. Without the stop the
-   * last movement packet keeps applying until input expiry, which overshoots.
+   * 朝目标点走,直到服务器权威坐标进入 radius,再发一包"停止"并等服务器稳定。
+   * 不发停止包的话,最后一条移动指令会一直生效到输入过期,从而冲过头。
    */
   async walkTo(target, radius = 1.6, maxMs = 20000) {
     const started = Date.now();
@@ -192,7 +190,7 @@ class Peer {
       return false;
     }
 
-    // Stop, then wait until the authoritative position has settled
+    // 先停下,再等权威坐标稳定
     for (let i = 0; i < 20; i += 1) {
       const self = this.latestSelf();
       this.send({
@@ -233,13 +231,13 @@ async function main() {
 
   const wild = wildPets[0];
 
-  // A wild pet cannot be stolen
+  // 野生宠物不能偷
   await a.walkTo(wild.pos, 1.8);
   a.send({ type: 'try_steal_pet', petId: wild.petId });
   const wildResult = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
   check('wild pets cannot be stolen', wildResult.ok === false && wildResult.reason === 'pet_wild', `reason=${wildResult.reason}`);
 
-  // Your own pet cannot be stolen
+  // 自己的宠物不能偷
   const selfSnap = await a.waitFor((m) => m.type === 'world_snapshot');
   const ownPet = selfSnap.pets.find((p) => p.ownerUid === a.uid);
   if (ownPet) {
@@ -250,12 +248,12 @@ async function main() {
     check('own pet cannot be stolen', true, 'A owns no pet, skipped');
   }
 
-  // Unknown pet
+  // 不存在的宠物
   a.send({ type: 'try_steal_pet', petId: 'nope-nope' });
   const missing = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
   check('unknown pet is refused', missing.ok === false && missing.reason === 'pet_missing', `reason=${missing.reason}`);
 
-  // Too far: another wild pet in a different part of the field
+  // 距离太远:另一只位于场地别处的野生宠物
   const farTarget = wildPets.find(
     (p) => Math.hypot(p.pos.x - wild.pos.x, p.pos.z - wild.pos.z) > 8,
   );
@@ -269,7 +267,7 @@ async function main() {
     );
   }
 
-  // Full steal path: grant an owner a pet in the database, then let B take it
+  // 完整抢夺链路:数据库里给 A 发一只宠物,再由 B 抢走
   const ownerReg = await api('/api/register', {
     method: 'POST',
     body: JSON.stringify({ username: `own_${suffix}`, password }),
@@ -290,8 +288,7 @@ async function main() {
     check('owner sees the granted pet', Boolean(ownedPet));
 
     if (ownedPet) {
-      // Bring both players to the pet first, so the cooldown check below does
-      // not spend its window on pathfinding.
+      // 先把两个玩家都走到宠物旁边,免得后面的冷却校验把 12 秒窗口花在走路上
       const aReady = await a.walkTo(ownedPet.pos, 2.2, 20000);
       const reached = await b.walkTo(ownedPet.pos, 1.9, 20000);
       check('B reached the target pet', reached);
@@ -311,8 +308,8 @@ async function main() {
           const inv = await b.waitFor((m) => m.type === 'inventory', 3000).catch(() => null);
           check('B inventory contains the pet', Boolean(inv?.pets?.some((p) => p.petId === ownedPet.petId)));
 
-          // Within the 12s window the previous owner cannot take it back. A is
-          // already standing beside the pet, so this only measures the cooldown.
+          // 12 秒窗口内原主人不能抢回去。A 已经站在宠物旁边,
+          // 所以这里只测量冷却本身
           a.drain((m) => m.type === 'action_result' && m.action === 'steal_pet');
           a.send({ type: 'try_steal_pet', petId: ownedPet.petId });
           const cd = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
@@ -341,6 +338,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Test crashed:', err.message);
+  console.error('测试异常:', err.message);
   process.exitCode = 1;
 });

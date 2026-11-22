@@ -1,11 +1,10 @@
 /**
- * Network layer: one long lived WebSocket.
+ * 网络层:WebSocket 长连接。
  *
- *   - A single connection per page load. Reconnects reuse the same client
- *     instead of reloading the page.
- *   - Inputs leave at 20Hz, dropping to 5Hz while the tab is hidden.
- *   - Heartbeat in both directions.
- *   - Automatic reconnect, at most 5 attempts, one second apart.
+ *   - 页面生命周期内只建立一次连接(重连复用同一个实例,不刷新页面)
+ *   - 20Hz 上报输入(切标签页降到 5Hz)
+ *   - 双向心跳
+ *   - 断线自动重连,最多 5 次,间隔 1s
  */
 
 export const TICK = {
@@ -24,8 +23,8 @@ export class NetClient {
    * @param {object} options
    * @param {(msg: object) => void} options.onMessage
    * @param {(state: string, info?: object) => void} options.onStateChange
-   * @param {() => string|null} options.getToken session token for the URL
-   * @param {() => void} [options.onJumpSent] fires once a jump has been sent
+   * @param {() => string|null} options.getToken 取 session token(用于 URL 参数)
+   * @param {() => void} [options.onJumpSent] 跳跃指令真正发出后回调,用于清掉待发送标记
    */
   constructor({ onMessage, onStateChange, getToken, onJumpSent }) {
     this.onMessage = onMessage;
@@ -44,9 +43,9 @@ export class NetClient {
     this.rttMs = null;
     this.closedByUser = false;
 
-    /** Current input, updated by the input layer */
+    /** 当前输入状态,由输入层更新 */
     this.input = { moveX: 0, moveZ: 0, jump: false };
-    /** Last authoritative position, sent back only for comparison */
+    /** 服务器最近一次下发的权威坐标,用于"仅对比校验"上报 */
     this.previewPos = { x: 0, y: 0, z: 0 };
     this.skinId = 'classic';
 
@@ -56,7 +55,7 @@ export class NetClient {
   }
 
   /* ------------------------------------------------------------------ *
-   * Connection
+   * 连接
    * ------------------------------------------------------------------ */
   connect() {
     if (this.state === 'open' || this.state === 'connecting') return;
@@ -72,8 +71,7 @@ export class NetClient {
     }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // The token travels as a query parameter so the connection works through
-    // the Cloudflare Worker proxy without relying on cookies.
+    // token 走 query 参数:可以穿过 Cloudflare Worker 代理,无需依赖 cookie
     const url = `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`;
 
     this.setState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
@@ -110,7 +108,7 @@ export class NetClient {
       }
       if (msg.type === 'pong') {
         this.lastPongAt = Date.now();
-        // t is our own timestamp echoed back, so the difference is real RTT
+        // t 是客户端自己发出的时间戳(服务器原样回显),相减得到真实 RTT
         if (typeof msg.t === 'number' && msg.t > 0 && msg.t <= Date.now()) {
           this.rttMs = Math.max(0, Date.now() - msg.t);
         }
@@ -127,7 +125,7 @@ export class NetClient {
         this.setState('closed', { reason: 'user' });
         return;
       }
-      // 4000 to 4999 are deliberate server decisions. Do not retry those.
+      // 4000-4999 是服务端主动判定:不允许重连
       if (event.code >= 4000 && event.code < 5000) {
         this.setState('closed', { reason: `server_${event.code}` });
         return;
@@ -136,7 +134,7 @@ export class NetClient {
     });
 
     ws.addEventListener('error', () => {
-      // The close event follows, so nothing to do here
+      // close 事件会跟着触发,这里不重复处理
     });
   }
 
@@ -165,7 +163,7 @@ export class NetClient {
       try {
         this.ws.close(1000, 'client_leave');
       } catch {
-        /* already closing */
+        /* 忽略 */
       }
       this.ws = null;
     }
@@ -178,13 +176,13 @@ export class NetClient {
   }
 
   /* ------------------------------------------------------------------ *
-   * Input reporting
+   * 输入上报
    * ------------------------------------------------------------------ */
   setInput(partial) {
     Object.assign(this.input, partial);
   }
 
-  /** Written back by the renderer; only used for the comparison field. */
+  /** 由渲染层把服务器权威坐标写回来,仅用于下一次上报的对比字段 */
   setPreviewPosition(pos) {
     this.previewPos.x = pos.x;
     this.previewPos.y = pos.y;
@@ -207,7 +205,7 @@ export class NetClient {
     if (hidden === this.backgroundMode) return;
     this.backgroundMode = hidden;
     if (this.state === 'open') {
-      // Hidden tab reports at 5Hz, visible again at 20Hz. Connection stays up.
+      // 切标签页:上报频率降级到 5Hz;切回来恢复 20Hz。连接不断开。
       this.startInputLoop();
     }
   }
@@ -224,7 +222,7 @@ export class NetClient {
         moveZ: round4(this.input.moveZ),
         jump: hadJump,
       },
-      // Compared against the authoritative position, never trusted
+      // 仅用于服务器对比校验;服务器从不采信这个坐标
       clientPreviewPos: {
         x: round4(this.previewPos.x),
         y: round4(this.previewPos.y),
@@ -232,8 +230,8 @@ export class NetClient {
       },
       skinId: this.skinId,
     });
-    // A jump is a one shot: clear it after sending so holding Space does not
-    // produce a second jump, and clear it only once it really went out.
+    // jump 是"一次性"动作:发出后清除,避免持续按住造成连跳;
+    // 但只在真的发出后才清,防止 60fps 采样把跳跃吞掉
     if (hadJump) {
       this.input.jump = false;
       this.onJumpSent?.();
@@ -241,13 +239,13 @@ export class NetClient {
   }
 
   /* ------------------------------------------------------------------ *
-   * Heartbeat
+   * 心跳
    * ------------------------------------------------------------------ */
   startHeartbeat() {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
       if (this.state !== 'open') return;
-      // The server drops a connection after 10s of silence; 3s is plenty
+      // 服务器 10 秒收不到 pong 会断开;这里 3 秒发一次 ping 足够
       this.send({ type: 'ping', t: Date.now() });
     }, TICK.heartbeatMs);
   }
@@ -258,7 +256,7 @@ export class NetClient {
   }
 
   /* ------------------------------------------------------------------ *
-   * Sending
+   * 发送
    * ------------------------------------------------------------------ */
   send(payload) {
     if (this.state !== 'open' || !this.ws) return false;
@@ -272,7 +270,7 @@ export class NetClient {
     }
   }
 
-  /** Action requests, fired by events rather than every frame. */
+  /** 操作请求(事件触发,不每帧) */
   tryPickGem(gemId) {
     return this.send({ type: 'try_pick_gem', gemId });
   }

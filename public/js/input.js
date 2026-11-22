@@ -1,8 +1,8 @@
 /**
- * Input capture: WASD plus Space.
+ * 输入采集:WASD + 空格。
  *
- * This only turns key state into moveX / moveZ / jump. Where the player
- * actually ends up is decided by the server; nothing here simulates physics.
+ * 只负责把按键状态翻译成 moveX/moveZ/jump。
+ * 具体"玩家跑到哪"由服务器决定,这里绝不计算物理。
  */
 export class InputController {
   constructor() {
@@ -29,7 +29,7 @@ export class InputController {
     const code = event.code;
 
     if (code === 'Space') {
-      // Stop the page from scrolling
+      // 阻止页面滚动
       event.preventDefault();
       if (!event.repeat) this.jumpPending = true;
       return;
@@ -50,14 +50,13 @@ export class InputController {
   }
 
   /**
-   * Input snapshot for this frame.
+   * 返回本帧的输入快照。
    *
-   * The camera looks down from +Z, so "forward on screen" is -Z.
-   * W maps to moveZ = -1, matching the server's integration direction.
+   * 世界坐标约定:相机在 +Z 方向俯视,所以"屏幕前方"= -Z。
+   * W 键 → moveZ = -1,与服务器积分方向一致。
    *
-   * jump is a pending flag, cleared by the network layer once a packet is
-   * actually sent. Clearing it here would swallow the jump, because frames
-   * run at 60fps and inputs only leave at 20Hz.
+   * 注意:jump 是"待发送"标记,由网络层在真正发包后清除。
+   * 这里不能清,否则 60fps 的采样会把一次跳跃在两次发包之间吞掉。
    */
   sample() {
     const forward =
@@ -70,7 +69,7 @@ export class InputController {
     return { moveX: strafe, moveZ: -forward, jump: this.jumpPending };
   }
 
-  /** Called by the network layer once the jump has been sent. */
+  /** 网络层确认跳跃已发出后调用 */
   consumeJump() {
     this.jumpPending = false;
   }

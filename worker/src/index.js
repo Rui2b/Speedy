@@ -1,21 +1,20 @@
 /**
- * Speedy edge gateway Worker.
+ * Speedy 边缘网关 Worker。
  *
- * Two jobs only. It holds no game logic.
- *   1. Serve the front end as Workers Assets from the global edge.
- *   2. Tunnel /ws (and /api/*) through to the Node origin.
+ * 只做两件事,不含任何游戏逻辑:
+ *   1. 托管前端静态资源(Workers Assets,全球 CDN)
+ *   2. 把 /ws 与 /api/* 透传到源站 Node 权威服
  *
- * How the WebSocket proxy works: fetch() to the origin with an Upgrade header
- * returns the origin's socket on response.webSocket. That socket is paired with
- * a WebSocketPair for the browser and frames are copied both ways. The Worker
- * never parses a game packet, it only moves bytes and coordinates close codes.
+ * WebSocket 代理原理:带 Upgrade 头 fetch 到源站,源站的 socket 落在
+ * response.webSocket 上;再与浏览器侧用 WebSocketPair 配对,双向转发帧。
+ * Worker 不解析任何游戏消息,只搬运字节并协调关闭码。
  */
 
 const WS_PATH = '/ws';
-/** Paths that belong to the Node origin (the game channel and the JSON API) */
+/** 交给源站 Node 的路径前缀(游戏通道与 JSON API) */
 const ORIGIN_PREFIXES = ['/ws', '/api/'];
 
-/** Close codes the Workers runtime refuses to forward */
+/** Workers 运行时不接受的关闭码,转发时必须替换 */
 const UNSENDABLE_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
 
 export default {
@@ -36,8 +35,8 @@ export default {
 };
 
 /**
- * Resolve the origin URL. ORIGIN_URL wins so a local origin works in dev
- * (http://127.0.0.1:8080); ORIGIN_HOST is the plain host form.
+ * 计算源站 URL。优先用完整的 ORIGIN_URL,便于本地联调
+ * (http://127.0.0.1:8080);ORIGIN_HOST 是纯主机名形式。
  */
 function originTarget(env, requestUrl) {
   const raw = env.ORIGIN_URL || (env.ORIGIN_HOST ? `https://${env.ORIGIN_HOST}` : '');
@@ -49,7 +48,7 @@ function originTarget(env, requestUrl) {
   return url;
 }
 
-/** Plain HTTP passthrough for the JSON API. */
+/** 普通 HTTP 请求(API)透传 */
 async function proxyHttp(request, env) {
   const target = originTarget(env, request.url);
   if (!target) return new Response('ORIGIN_URL is not configured', { status: 500 });
@@ -99,7 +98,7 @@ async function proxyWebSocket(request, env) {
 
   const originWs = originResp.webSocket;
   if (!originWs) {
-    // Pass the origin's status through so the page can report something useful
+    // 源站拒绝升级:把源站的状态码原样带回,便于前端提示
     return new Response(`Origin refused upgrade (${originResp.status})`, {
       status: originResp.status === 101 ? 502 : originResp.status,
     });
@@ -111,7 +110,7 @@ async function proxyWebSocket(request, env) {
   const [clientWs, serverWs] = Object.values(pair);
   serverWs.accept();
 
-  // Browser to origin
+  // 浏览器 → 源站
   serverWs.addEventListener('message', (event) => {
     try {
       originWs.send(event.data);
@@ -125,7 +124,7 @@ async function proxyWebSocket(request, env) {
     safeClose(originWs, event.code, event.reason);
   });
 
-  // Origin to browser
+  // 源站 → 浏览器
   originWs.addEventListener('message', (event) => {
     try {
       serverWs.send(event.data);
@@ -142,13 +141,13 @@ async function proxyWebSocket(request, env) {
   return new Response(null, { status: 101, webSocket: clientWs });
 }
 
-/** Close without throwing, replacing codes the runtime will not send. */
+/** 不抛异常地关闭连接,并把不可发送的关闭码替换成 1011。 */
 function safeClose(ws, code, reason) {
   try {
     if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) return;
     const sendable =
       Number.isInteger(code) && code >= 1000 && code < 5000 && !UNSENDABLE_CLOSE_CODES.has(code);
-    // Reasons are capped at 123 bytes, longer ones are rejected
+    // reason 上限 123 字节,超长会被运行时拒绝
     const text = typeof reason === 'string' ? reason.slice(0, 100) : '';
     if (sendable) ws.close(code, text);
     else if (code === 1000) ws.close(1000, text);
@@ -157,7 +156,7 @@ function safeClose(ws, code, reason) {
     try {
       ws.close(1011, 'close_failed');
     } catch {
-      /* already closed */
+      /* 已关闭 */
     }
   }
 }

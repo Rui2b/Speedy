@@ -1,9 +1,8 @@
 /**
- * Protocol layer: parsing and strict validation of upstream packets.
+ * 协议层:上行包的解析与严格校验。
  *
- * Security rule: a wrong type, an out-of-range value or a missing field drops
- * the whole packet and returns an error. Nothing unvalidated reaches the
- * simulation loop.
+ * 安全原则:任何字段类型不对、范围越界、字段缺失,都直接丢弃整包并返回错误,
+ * 绝不把未经校验的数据塞进模拟循环。
  */
 import { TIMING, VALID_SKINS } from './config.js';
 
@@ -42,7 +41,7 @@ function isSafeId(value, maxLength = 64) {
 }
 
 /**
- * Parse and validate one upstream packet.
+ * 解析并校验一个上行包。
  * @param {string|Buffer} raw
  * @returns {{type: string, payload: object} | {error: string}}
  */
@@ -80,14 +79,12 @@ export function parseClientMessage(raw) {
 }
 
 /**
- * player_input packet.
+ * player_input 包。
  *
- * Accepts only moveX, moveZ and jump, plus clientPreviewPos which is used for
- * comparison and never trusted.
+ * 严格按方案:只接受 moveX / moveZ / jump,以及仅用于对比校验的 clientPreviewPos。
  *
- * Fields like gems, petId or speedBonus are never read. A client may send
- * them; they are ignored and every value comes from the server's own
- * simulation.
+ * 关键:绝不读取 gems / petId / speedBonus 等字段——即使客户端发了也忽略,
+ * 服务器所有数值都由自己的模拟产生。
  */
 function parseInput(data) {
   const { seq, input, clientPreviewPos, skinId } = data;
@@ -109,7 +106,7 @@ function parseInput(data) {
     if (!isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(z)) {
       return { error: 'bad_preview' };
     }
-    // Reject absurd coordinates so they cannot pollute the cheat log
+    // 拒绝明显离谱的坐标,避免用于日志污染的巨值
     if (Math.abs(x) > 1e4 || Math.abs(y) > 1e4 || Math.abs(z) > 1e4) {
       return { error: 'bad_preview' };
     }
