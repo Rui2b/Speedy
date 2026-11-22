@@ -1,0 +1,27 @@
+﻿{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "speedy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "../public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    {
+      "pattern": "speedy.potatoedu.cc",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "ORIGIN_URL": "https://09437374-4836-4680-a7d0-1141c1c19129.cfargotunnel.com",
+    "ORIGIN_HOST": "speedy-origin.potatoedu.cc"
+  }
+}
+
+

@@ -1,0 +1,431 @@
+/* ---------------------------------------------------------------------------
+ * Speedy UI 样式
+ * 全部字号/间距用 CSS 变量,方便换美术时统一调整。
+ * ------------------------------------------------------------------------- */
+:root {
+  --bg: #0b1120;
+  --bg-soft: #111a2e;
+  --fg: #e8eefc;
+  --fg-dim: #9fb0cd;
+  --accent: #4ade80;
+  --accent-2: #38bdf8;
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --panel: rgba(14, 22, 40, 0.92);
+  --border: rgba(148, 178, 224, 0.18);
+  --radius: 14px;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  touch-action: none;
+}
+
+#app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+#scene {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+/* ------------------------------- HUD ------------------------------------ */
+.hud {
+  position: absolute;
+  inset: 0 0 auto 0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.hud-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.stat-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.stat .unit {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-weight: 500;
+}
+
+.stat-muted {
+  color: var(--fg-dim);
+  font-weight: 500;
+}
+
+.pets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: min(720px, 100%);
+}
+
+.pet-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 8px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+}
+
+.pet-chip.hatched {
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.pet-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  flex: none;
+}
+
+.pet-chip.hatched .pet-dot {
+  background: var(--accent);
+}
+
+.pet-progress {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------ 提示 ------------------------------------ */
+.toast {
+  position: absolute;
+  left: 50%;
+  top: 15%;
+  transform: translate(-50%, -8px);
+  padding: 10px 18px;
+  border-radius: 12px;
+  background: rgba(9, 15, 28, 0.94);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  pointer-events: none;
+  z-index: 30;
+  white-space: nowrap;
+  max-width: 90vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.toast.good {
+  border-color: rgba(74, 222, 128, 0.55);
+  color: var(--accent);
+}
+
+.toast.bad {
+  border-color: rgba(248, 113, 113, 0.55);
+  color: var(--danger);
+}
+
+.conn-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 600;
+  z-index: 25;
+  white-space: nowrap;
+}
+
+.controls-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--fg-dim);
+  z-index: 10;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  white-space: nowrap;
+}
+
+.controls-hint kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(148, 178, 224, 0.12);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg);
+  text-align: center;
+}
+
+.controls-hint .sep {
+  opacity: 0.45;
+  margin: 0 2px;
+}
+
+/* ----------------------------- 覆盖层 ---------------------------------- */
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: radial-gradient(circle at 50% 30%, rgba(56, 189, 248, 0.14), transparent 60%),
+    rgba(5, 9, 18, 0.86);
+  backdrop-filter: blur(6px);
+  z-index: 50;
+  transition: opacity 0.25s ease;
+}
+
+.overlay[hidden] {
+  display: none;
+}
+
+.panel {
+  width: min(400px, 100%);
+  padding: 30px 28px 24px;
+  border-radius: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.logo {
+  margin: 0;
+  font-size: 38px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-align: center;
+  background: linear-gradient(100deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.tagline {
+  margin: 6px 0 26px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field > span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  letter-spacing: 0.02em;
+}
+
+.field input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(8, 13, 24, 0.7);
+  color: var(--fg);
+  font-size: 15px;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: rgba(74, 222, 128, 0.6);
+  box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.14);
+}
+
+.field input::placeholder {
+  color: rgba(159, 176, 205, 0.55);
+}
+
+.error {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.btn {
+  flex: 1;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.btn.primary {
+  background: linear-gradient(100deg, var(--accent), #22c55e);
+  color: #06230f;
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: rgba(148, 178, 224, 0.08);
+}
+
+.fineprint {
+  margin: 20px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: rgba(159, 176, 205, 0.65);
+  text-align: center;
+}
+
+/* ------------------------------ 加载 ----------------------------------- */
+.loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 16px;
+  background: rgba(5, 9, 18, 0.82);
+  z-index: 40;
+  color: var(--fg-dim);
+  font-size: 14px;
+}
+
+.loading[hidden] {
+  display: none;
+}
+
+.spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(148, 178, 224, 0.2);
+  border-top-color: var(--accent);
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 560px) {
+  .controls-hint {
+    display: none;
+  }
+
+  .logo {
+    font-size: 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+
+  .toast {
+    transition: none;
+  }
+}

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>Speedy</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%83%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene" aria-label="游戏画面"></canvas>
+
+    <!-- 顶部 HUD -->
+    <div id="hud" class="hud" hidden>
+      <div class="hud-row">
+        <div class="stat" title="宝石">
+          <span class="stat-icon">💎</span>
+          <span id="hud-gems">0</span>
+        </div>
+        <div class="stat" title="在线人数">
+          <span class="stat-icon">👥</span>
+          <span id="hud-online">0</span>
+        </div>
+        <div class="stat" id="hud-ping-wrap" title="延迟">
+          <span class="stat-icon">📶</span>
+          <span id="hud-ping">--</span><span class="unit">ms</span>
+        </div>
+        <div class="stat stat-muted" id="hud-fps-wrap" title="帧率">
+          <span id="hud-fps">--</span><span class="unit">fps</span>
+        </div>
+      </div>
+      <div id="hud-pets" class="pets"></div>
+    </div>
+
+    <!-- 提示条 -->
+    <div id="toast" class="toast" hidden></div>
+    <div id="conn-banner" class="conn-banner" hidden></div>
+
+    <!-- 底部操作提示 -->
+    <div id="controls-hint" class="controls-hint" hidden>
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动
+      <span class="sep">·</span>
+      <kbd>Space</kbd> 跳跃
+      <span class="sep">·</span>
+      <kbd>E</kbd> 拾取 / 偷宠物
+      <span class="sep">·</span>
+      <kbd>F</kbd> 孵化
+    </div>
+
+    <!-- 登录层 -->
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <h1 class="logo">Speedy</h1>
+        <p class="tagline">跑起来,捡宝石,偷宠物</p>
+
+        <form id="auth-form" autocomplete="on">
+          <label class="field">
+            <span>用户名</span>
+            <input id="username" name="username" type="text" inputmode="text"
+                   autocomplete="username" maxlength="20" minlength="3"
+                   pattern="[A-Za-z0-9_]{3,20}" required placeholder="3-20 位字母/数字/下划线" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="password" name="password" type="password"
+                   autocomplete="current-password" minlength="6" maxlength="128"
+                   required placeholder="至少 6 位" />
+          </label>
+
+          <p id="auth-error" class="error" role="alert" hidden></p>
+
+          <div class="actions">
+            <button type="submit" id="btn-login" class="btn primary">进入游戏</button>
+            <button type="button" id="btn-register" class="btn ghost">注册新账号</button>
+          </div>
+        </form>
+
+        <p class="fineprint">
+          输入只上报操作指令,位置、宝石、宠物全部由服务器算。
+        </p>
+      </div>
+    </div>
+
+    <!-- 加载层 -->
+    <div id="loading" class="loading" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loading-text">正在连接服务器…</p>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

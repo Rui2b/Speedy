@@ -1,0 +1,14 @@
+node_modules/
+.env
+logs/
+*.log
+.DS_Store
+Thumbs.db
+.wrangler/
+dist/
+coverage/
+.speedy-cache/
+
+# 方案草稿不进仓库
+agent-plan.txt
+
