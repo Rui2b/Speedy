@@ -35,6 +35,33 @@ export default {
 };
 
 /**
+ * 源站需要的头。
+ *
+ * - X-Origin-Secret:证明这次请求来自本 Worker。源站域名可被公网直连,
+ *   没有这个头的话,攻击者能绕过 Turnstile 直接打源站。
+ * - X-Turnstile-Site-Key / -Secret:Turnstile 的 key 存在 Worker 的环境变量里,
+ *   源站进程读不到,所以由这里随请求带过去。两个头都只在本机回环的
+ *   源站链路上出现,不经过任何其他网络。
+ */
+function originHeaders(env, request, extra = {}) {
+  const headers = new Headers(request.headers);
+  headers.set('X-Forwarded-Host', new URL(request.url).host);
+  headers.set('CF-Connecting-IP', request.headers.get('CF-Connecting-IP') ?? '');
+
+  const secret = env.ORIGIN_SHARED_SECRET;
+  if (secret) headers.set('X-Origin-Secret', secret);
+
+  // 变量名沿用 Cloudflare 上已有的（注意 SECRECT 的拼写）
+  const siteKey = env.CF_TURNSTILE_SITE_KEY;
+  const turnstileSecret = env.CF_TURNSTILE_SECRECT_KEY || env.CF_TURNSTILE_SECRET_KEY;
+  if (siteKey) headers.set('X-Turnstile-Site-Key', siteKey);
+  if (turnstileSecret) headers.set('X-Turnstile-Secret-Key', turnstileSecret);
+
+  for (const [key, value] of Object.entries(extra)) headers.set(key, value);
+  return headers;
+}
+
+/**
  * 计算源站 URL。优先用完整的 ORIGIN_URL,便于本地联调
  * (http://127.0.0.1:8080);ORIGIN_HOST 是纯主机名形式。
  */
@@ -53,14 +80,10 @@ async function proxyHttp(request, env) {
   const target = originTarget(env, request.url);
   if (!target) return new Response('ORIGIN_URL is not configured', { status: 500 });
 
-  const headers = new Headers(request.headers);
-  headers.set('X-Forwarded-Host', new URL(request.url).host);
-  headers.set('CF-Connecting-IP', request.headers.get('CF-Connecting-IP') ?? '');
-
   try {
     return await fetch(target.toString(), {
       method: request.method,
-      headers,
+      headers: originHeaders(env, request),
       body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
       redirect: 'manual',
     });
@@ -83,14 +106,11 @@ async function proxyWebSocket(request, env) {
   try {
     originResp = await fetch(originUrl.toString(), {
       method: 'GET',
-      headers: {
+      headers: originHeaders(env, request, {
         Upgrade: 'websocket',
         Connection: 'Upgrade',
-        'X-Forwarded-Host': clientUrl.host,
-        'X-Forwarded-Proto': 'https',
-        'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') ?? '',
         'User-Agent': request.headers.get('User-Agent') ?? 'speedy-worker',
-      },
+      }),
     });
   } catch (err) {
     return new Response(`Bad Gateway: ${err?.message ?? 'origin unreachable'}`, { status: 502 });

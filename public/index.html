@@ -9,6 +9,8 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preload" href="/vendor/fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/css/style.css" />
+  <!-- Turnstile 官方脚本;render=explicit 表示由我们决定挂载时机 -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 </head>
 <body>
   <div id="app">
@@ -86,6 +88,14 @@
           </label>
 
           <p id="auth-error" class="field-error" role="alert" hidden></p>
+
+          <!-- Cloudflare Turnstile:由 /api/config 下发 site key 后渲染 -->
+          <div id="turnstile-slot" class="turnstile-slot" hidden>
+            <div id="turnstile-widget"></div>
+            <p id="turnstile-note" class="turnstile-note" hidden>
+              Verification is unavailable. Reload the page, or check your connection.
+            </p>
+          </div>
 
           <div class="entry-actions">
             <button type="submit" id="btn-login" class="btn btn-primary">Sign in</button>

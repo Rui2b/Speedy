@@ -37,6 +37,16 @@ async function grantPet(uid) {
   }
 }
 
+/**
+ * Turnstile 的 token 只能由真实浏览器产生,自动化测试用 Cloudflare 官方的
+ * "始终通过"测试 secret。生产环境用的是真 key,伪造 token 会被拒。
+ */
+const TEST_TURNSTILE_TOKEN = 'XXXX.DUMMY.TOKEN.XXXX';
+
+function authBody(fields) {
+  return JSON.stringify({ ...fields, turnstileToken: TEST_TURNSTILE_TOKEN });
+}
+
 async function api(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     ...options,
@@ -66,13 +76,13 @@ class Peer {
     const peer = new Peer(name);
     const reg = await api('/api/register', {
       method: 'POST',
-      body: JSON.stringify({ username: name, password }),
+      body: authBody({ username: name, password }),
     });
     let cookie = reg.cookie;
     if (reg.status === 409) {
       const login = await api('/api/login', {
         method: 'POST',
-        body: JSON.stringify({ username: name, password }),
+        body: authBody({ username: name, password }),
       });
       cookie = login.cookie;
     }
@@ -270,7 +280,7 @@ async function main() {
   // 完整抢夺链路:数据库里给 A 发一只宠物,再由 B 抢走
   const ownerReg = await api('/api/register', {
     method: 'POST',
-    body: JSON.stringify({ username: `own_${suffix}`, password }),
+    body: authBody({ username: `own_${suffix}`, password }),
   });
   check('owner account registered', ownerReg.status === 201, `status=${ownerReg.status}`);
 

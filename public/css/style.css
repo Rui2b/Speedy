@@ -474,6 +474,20 @@ body {
   margin-top: 24px;
 }
 
+/* --- Turnstile ------------------------------------------------------------ */
+.turnstile-slot {
+  margin-top: 20px;
+  /* widget 是固定 300px 宽,留出最小高度避免加载时跳动 */
+  min-height: 66px;
+}
+
+.turnstile-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--negative);
+}
+
 .btn {
   height: 44px;
   padding: 0 20px;

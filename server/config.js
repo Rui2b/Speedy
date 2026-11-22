@@ -155,10 +155,51 @@ export const AUTH = {
   passwordMaxLength: 128,
 };
 
+/* ------------------------------------------------------------------------- *
+ * Cloudflare Turnstile 人机认证
+ *
+ * 变量名沿用 Cloudflare Dashboard 上已有的命名。注意 SECRET 在 Dashboard 上
+ * 拼成了 SECRECT,这里按原样读取,同时接受正确的拼写作为回退,免得哪天你把它
+ * 改对了反而失效。
+ *
+ * key 的优先级:
+ *   1. 进程环境变量(本地开发、直连部署)
+ *   2. Worker 随请求带来的头(生产环境,key 存在 Cloudflare 上)
+ * ------------------------------------------------------------------------- */
+function firstHeader(req, names) {
+  if (!req) return '';
+  for (const name of names) {
+    const value = req.headers[name];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return '';
+}
+
+/**
+ * 解析 Turnstile 配置。
+ * @param {import('node:http').IncomingMessage} [req] 用来读取 Worker 带来的头
+ */
+export function turnstileConfig(req) {
+  return {
+    siteKey:
+      process.env.CF_TURNSTILE_SITE_KEY ||
+      process.env.TURNSTILE_SITE_KEY ||
+      firstHeader(req, ['x-turnstile-site-key']),
+    secretKey:
+      process.env.CF_TURNSTILE_SECRECT_KEY ||
+      process.env.CF_TURNSTILE_SECRET_KEY ||
+      process.env.TURNSTILE_SECRET_KEY ||
+      firstHeader(req, ['x-turnstile-secret-key']),
+    verifyUrl: 'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+    /** 单次校验的超时时间 */
+    timeoutMs: 5000,
+    widgetScript: 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
+  };
+}
+
 export const LOG = {
   level: process.env.LOG_LEVEL || 'info',
-  cheatLogFile: path.resolve(ROOT_DIR, process.env.CHEAT_LOG_FILE || 'logs/cheat.log'),
-};
+  cheatLogFile: path.resolve(ROOT_DIR, process.env.CHEAT_LOG_FILE || 'logs/cheat.log'),};
 
 /* ------------------------------------------------------------------------- *
  * 地图刷新点(服务端配置,前端不可控)

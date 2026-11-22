@@ -390,6 +390,59 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 换美术资源只改 [`public/js/assets.js`](public/js/assets.js)：
 配色、模型尺寸、相机、皮肤颜色/贴图都在那里。
 
+### Cloudflare Turnstile(注册与登录人机认证)
+
+注册和登录都必须先通过 Turnstile。token 由浏览器产出,服务端再带 secret
+去 Cloudflare 校验一次,伪造的 token 无效。
+
+| 变量 | 说明 |
+| --- | --- |
+| `CF_TURNSTILE_SITE_KEY` | 公开值,下发给浏览器渲染 widget |
+| `CF_TURNSTILE_SECRECT_KEY` | 私密值,只用于服务端 siteverify |
+
+注意 **SECRECT 的拼写**:Cloudflare Dashboard 上这个 key 就是这么拼的。
+代码按原样读取,同时接受正确的 `CF_TURNSTILE_SECRET_KEY`,改对了也不会失效。
+
+生产环境这两个 key 存在 **Worker 的环境变量**里,由 Worker 随请求头转到源站
+(`X-Turnstile-Site-Key` / `X-Turnstile-Secret-Key`),服务器 `.env` 里不需要写。
+
+**未配置时注册和登录一律拒绝**(返回 `503 captcha_failed / not_configured`),
+不会静默放行。
+
+本地开发想跑通,用 Cloudflare 官方测试 key:
+
+```ini
+CF_TURNSTILE_SITE_KEY=1x00000000000000000000AA
+CF_TURNSTILE_SECRECT_KEY=1x0000000000000000000000000000000AA   # 始终通过
+```
+
+换成 `2x0000000000000000000000000000000AA` 则始终失败,用来验证拒绝路径。
+
+### 源站保护(ORIGIN_SHARED_SECRET)
+
+`speedy-origin.<域名>` 是公网可直连的。如果只在前端放 Turnstile,攻击者直接
+POST 源站就能完全跳过。
+
+所以 Worker 转发时会带一个共享密钥 `X-Origin-Secret`,源站只接受带了正确头的
+请求,其余 `/api/*` 与 WebSocket 握手一律 `403 direct_origin_forbidden`。
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+两边都要配,值必须相同:
+
+```bash
+# Worker(Cloudflare 侧)
+cd worker && npx wrangler secret put ORIGIN_SHARED_SECRET --name speedy
+
+# 源站
+echo 'ORIGIN_SHARED_SECRET=<同一个值>' | sudo tee -a /opt/speedy/.env
+sudo systemctl restart speedy
+```
+
+不配这个变量时源站不做来源检查(方便本地开发),生产环境启动日志会给出警告。
+
 ---
 
 ## 测试流程
@@ -431,6 +484,35 @@ curl -s http://127.0.0.1:8080/api/health           # tick / 在线数
 ## 作弊测试用例
 
 以下用例用于验证防作弊是否生效。**只在自己的服务器上测试。**
+
+### 0. 绕过人机认证 / 直连源站 → 拒绝
+
+```bash
+# 不带 Turnstile token 直接注册
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"hacker","password":"TestPass123"}' \
+  https://speedy.potatoedu.cc/api/register
+# 期望:403 {"error":"captcha_failed","reason":"missing_token"}
+
+# 伪造一个 token
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"hacker","password":"TestPass123","turnstileToken":"forged"}' \
+  https://speedy.potatoedu.cc/api/register
+# 期望:403 {"error":"captcha_failed","reason":"rejected"}
+
+# 绕开 Worker,直接打源站(源站域名公网可达)
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"hacker","password":"TestPass123"}' \
+  https://speedy-origin.potatoedu.cc/api/register
+# 期望:403 {"error":"direct_origin_forbidden"}
+
+# 同样绕开 Worker 直接连 WebSocket
+wscat -c "wss://speedy-origin.potatoedu.cc/ws?token=<任意>"
+# 期望:立即关闭,code 4003
+```
+
+注意第 3、4 条只有在配置了 `ORIGIN_SHARED_SECRET` 之后才会生效。
+这是 Turnstile 真正有意义的前提——否则攻击者根本不需要过 Turnstile。
 
 ### 1. 超频发包 → 断开
 

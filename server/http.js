@@ -34,16 +34,19 @@ function setSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  // 允许同源加载 three.js + WebSocket;不允许内联脚本之外的第三方
+  // 脚本只允许同源 + Turnstile 官方域名;Turnstile 会在页面里嵌 iframe,
+  // 并向多个 *.challenges.cloudflare.com 子域发起探测,所以 frame-src 与
+  // connect-src 都要放开这些域名,否则 widget 会静默失效。
   res.setHeader(
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      "script-src 'self'",
+      "script-src 'self' https://challenges.cloudflare.com",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
-      "connect-src 'self' ws: wss:",
+      "connect-src 'self' ws: wss: data: https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://*.cloudflarecaptcha.com",
       "font-src 'self'",
+      'frame-src https://challenges.cloudflare.com',
       "object-src 'none'",
       "base-uri 'none'",
       "form-action 'self'",

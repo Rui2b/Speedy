@@ -10,6 +10,7 @@ import { Hud } from './hud.js';
 import { InputController } from './input.js';
 import { NetClient } from './net.js';
 import { ACTION_KEYS, findNearestGem, findNearestPet } from './targeting.js';
+import { TurnstileGate } from './turnstile.js';
 
 const el = {
   canvas: document.getElementById('scene'),
@@ -22,6 +23,9 @@ const el = {
   btnRegister: document.getElementById('btn-register'),
   loading: document.getElementById('loading'),
   loadingText: document.getElementById('loading-text'),
+  turnstileSlot: document.getElementById('turnstile-slot'),
+  turnstileWidget: document.getElementById('turnstile-widget'),
+  turnstileNote: document.getElementById('turnstile-note'),
 };
 
 const state = {
@@ -43,6 +47,13 @@ const state = {
 const hud = new Hud();
 const view = new GameView(el.canvas);
 const input = new InputController();
+
+const gate = new TurnstileGate({
+  slot: el.turnstileSlot,
+  container: el.turnstileWidget,
+  note: el.turnstileNote,
+  onError: (message) => authError(message),
+});
 
 const net = new NetClient({
   onMessage: handleServerMessage,
@@ -76,6 +87,7 @@ async function boot() {
     /* 网络异常时退回登录 */
   }
   setLoading(false);
+  await gate.init();
   showLogin();
 }
 
@@ -102,6 +114,8 @@ const ERROR_TEXT = {
   invalid_json: 'The request could not be read',
   server_error: 'The server could not handle that. Try again',
   network: 'Cannot reach the server',
+  captcha_failed: 'Complete the verification below, then try again',
+  direct_origin_forbidden: 'This server must be reached through its public address',
 };
 
 async function submitAuth(mode) {
@@ -119,17 +133,26 @@ async function submitAuth(mode) {
     return;
   }
 
+  // 必须先拿到 Turnstile token 才能提交;服务端未启用时 takeToken() 返回空串
+  const turnstileToken = gate.takeToken();
+  if (turnstileToken === null) {
+    authError('Finish the verification below first');
+    return;
+  }
+
   setBusy(true, mode);
   try {
     const res = await fetch(`/api/${mode}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, turnstileToken }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
       authError(ERROR_TEXT[data.error] ?? 'Sign in failed');
+      // token 已被消费或校验失败,换一个新的
+      gate.reset(true);
       return;
     }
 
@@ -142,6 +165,7 @@ async function submitAuth(mode) {
     startGame({ uid: data.uid, displayName: data.displayName });
   } catch {
     authError(ERROR_TEXT.network);
+    gate.reset();
   } finally {
     setBusy(false, mode);
   }

@@ -40,6 +40,21 @@ async function api(path, options = {}) {
   return { status: res.status, body: json, cookies: res.headers.getSetCookie?.() ?? [] };
 }
 
+/**
+ * 注册 / 登录请求体。
+ *
+ * Turnstile 的 token 只能由真实浏览器产生,所以自动化测试用 Cloudflare 官方的
+ * "始终通过"测试 secret。服务端只要配置了这个测试 secret,任意字符串都能通过。
+ * 生产环境用的是真 key,伪造的 token 会被拒。
+ *
+ * 若服务端未启用 Turnstile(本地没配 key),则返回 503,脚本也能识别。
+ */
+const TEST_TURNSTILE_TOKEN = 'XXXX.DUMMY.TOKEN.XXXX';
+
+function authBody(fields) {
+  return JSON.stringify({ ...fields, turnstileToken: TEST_TURNSTILE_TOKEN });
+}
+
 /** 极简 cookie jar,只需要 speedy_session */
 function cookieFrom(headers) {
   for (const item of headers || []) {
@@ -138,31 +153,31 @@ async function main() {
   /* ---------------------------- 1. 账号 ---------------------------- */
   const regA = await api('/api/register', {
     method: 'POST',
-    body: JSON.stringify({ username: userA, password }),
+    body: authBody({ username: userA, password }),
   });
   record('register user A', regA.status === 201 && regA.body.ok === true, `status=${regA.status}`);
 
   const dup = await api('/api/register', {
     method: 'POST',
-    body: JSON.stringify({ username: userA, password }),
+    body: authBody({ username: userA, password }),
   });
   record('duplicate username refused', dup.status === 409 && dup.body.error === 'username_taken', `status=${dup.status}`);
 
   const badName = await api('/api/register', {
     method: 'POST',
-    body: JSON.stringify({ username: 'a', password }),
+    body: authBody({ username: 'a', password }),
   });
   record('short username refused', badName.status === 400, `status=${badName.status}`);
 
   const badPass = await api('/api/login', {
     method: 'POST',
-    body: JSON.stringify({ username: userA, password: 'wrongpass' }),
+    body: authBody({ username: userA, password: 'wrongpass' }),
   });
   record('wrong password refused', badPass.status === 401, `status=${badPass.status}`);
 
   const regB = await api('/api/register', {
     method: 'POST',
-    body: JSON.stringify({ username: userB, password }),
+    body: authBody({ username: userB, password }),
   });
   const cookieB = cookieFrom(regB.cookies);
   record('register user B', regB.status === 201 && Boolean(cookieB), `status=${regB.status}`);

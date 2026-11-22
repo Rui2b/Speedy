@@ -6,8 +6,9 @@
  *   - GameRoom:20 tick/s 权威模拟 + 10Hz 广播
  */
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { AUTH, GAME, NETWORK, isProduction } from './config.js';
+import { AUTH, GAME, NETWORK, isProduction, turnstileConfig } from './config.js';
 import {
   SESSION_COOKIE,
   hashPassword,
@@ -20,16 +21,79 @@ import { GameRoom } from './gameRoom.js';
 import { readJsonBody, sendJson, serveStatic } from './http.js';
 import { closeLogger, createLogger } from './logger.js';
 import { getStore } from './store.js';
+import { clientIp, isConfigured as turnstileConfigured, verifyToken } from './turnstile.js';
 
 const log = createLogger('server');
 
 const store = getStore();
 const room = new GameRoom({ store });
 
+/**
+ * 源站与边缘之间的共享密钥。
+ *
+ * speed-origin 这个域名是公网可直连的,所以只在前端放 Turnstile 等于没放:
+ * 攻击者直接 POST 源站就能跳过。Worker 在转发时带上这个头,Node 只接受
+ * 带了正确头的请求,从而保证所有流量都必须经过 Worker。
+ *
+ * 未配置时(Node 直接从公网访问、或本地开发)不做这项检查。
+ */
+const ORIGIN_SHARED_SECRET = process.env.ORIGIN_SHARED_SECRET || '';
+
+if (!turnstileConfigured()) {
+  log.error(
+    '进程环境变量里没有 Turnstile key。生产环境由 Worker 随请求头下发,可以忽略本条;' +
+      '本地开发请在 .env 中补齐 CF_TURNSTILE_SITE_KEY 与 CF_TURNSTILE_SECRECT_KEY。',
+  );
+}
+if (isProduction && !ORIGIN_SHARED_SECRET) {
+  log.warn(
+    '未配置 ORIGIN_SHARED_SECRET。源站域名若可被公网直连,' +
+      '攻击者可绕过 Worker 的 Turnstile 直接打源站。',
+  );
+}
+
 /* ------------------------------------------------------------------------- *
  * HTTP 路由
  * ------------------------------------------------------------------------- */
 const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
+
+/** 允许的 action 值,与前端 widget 的 action 参数一一对应。 */
+const TURNSTILE_ACTION = {
+  login: 'login',
+  register: 'register',
+};
+
+/**
+ * 请求是否确实来自我们自己的 Worker。
+ * 未配置共享密钥时一律放行(本地开发、直连部署)。
+ */
+function cameThroughWorker(req) {
+  if (!ORIGIN_SHARED_SECRET) return true;
+  const provided = req.headers['x-origin-secret'];
+  if (typeof provided !== 'string' || provided.length === 0) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(ORIGIN_SHARED_SECRET);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * 校验 Turnstile,并统一给出错误响应。
+ * @returns {Promise<boolean>} true 表示通过,可以直接继续
+ */
+async function passTurnstile(req, res, action) {
+  const result = await verifyToken(req.turnstileToken, {
+    remoteIp: clientIp(req),
+    expectedAction: action,
+    req,
+  });
+  if (result.ok) return true;
+
+  log.warn('人机校验未通过', { action, reason: result.reason, codes: result.codes });
+  const status = result.reason === 'not_configured' ? 503 : 403;
+  sendJson(res, status, { error: 'captcha_failed', reason: result.reason });
+  return false;
+}
 
 function validateCredentials(body) {
   const username = typeof body.username === 'string' ? body.username.trim() : '';
@@ -56,6 +120,9 @@ function cookieHeader(token, maxAgeSeconds) {
 async function handleRegister(req, res) {
   const body = await readJsonBody(req);
   if (body.error) return sendJson(res, 400, { error: body.error });
+
+  req.turnstileToken = typeof body.data.turnstileToken === 'string' ? body.data.turnstileToken : '';
+  if (!(await passTurnstile(req, res, TURNSTILE_ACTION.register))) return undefined;
 
   const creds = validateCredentials(body.data);
   if (creds.error) return sendJson(res, 400, { error: creds.error });
@@ -87,6 +154,9 @@ async function handleRegister(req, res) {
 async function handleLogin(req, res) {
   const body = await readJsonBody(req);
   if (body.error) return sendJson(res, 400, { error: body.error });
+
+  req.turnstileToken = typeof body.data.turnstileToken === 'string' ? body.data.turnstileToken : '';
+  if (!(await passTurnstile(req, res, TURNSTILE_ACTION.login))) return undefined;
 
   const creds = validateCredentials(body.data);
   if (creds.error) return sendJson(res, 400, { error: creds.error });
@@ -159,7 +229,25 @@ function handleLogout(req, res) {
   });
 }
 
-function handleHealth(req, res) {  sendJson(res, 200, {
+/**
+ * 公开配置:只给浏览器需要的东西。
+ * site key 本来就是公开值(会出现在 HTML 里),secret 绝不外传。
+ */
+function handleConfig(req, res) {
+  const cfg = turnstileConfig(req);
+  const enabled = Boolean(cfg.siteKey && cfg.secretKey);
+  sendJson(res, 200, {
+    ok: true,
+    turnstile: {
+      enabled,
+      siteKey: enabled ? cfg.siteKey : null,
+      scriptUrl: cfg.widgetScript,
+    },
+  });
+}
+
+function handleHealth(req, res) {
+  sendJson(res, 200, {
     ok: true,
     ticks: room.world.tick,
     online: room.world.onlineCount,
@@ -175,7 +263,15 @@ function handleHealth(req, res) {  sendJson(res, 200, {
 const server = http.createServer((req, res) => {
   const url = req.url || '/';
 
+  // /api/config 与 /api/health 是公开的,其余一律要求来自 Worker
+  if (url === '/api/config') return handleConfig(req, res);
   if (url === '/api/health') return handleHealth(req, res);
+
+  if (url.startsWith('/api/') && !cameThroughWorker(req)) {
+    // 直连源站、且没带共享密钥:直接拒绝,防止绕过 Worker 上的任何保护
+    return sendJson(res, 403, { error: 'direct_origin_forbidden' });
+  }
+
   if (url === '/api/register' && req.method === 'POST') {
     handleRegister(req, res).catch((err) => {
       log.error('注册处理异常', { message: err.message });
@@ -213,8 +309,16 @@ const wss = new WebSocketServer({
 /**
  * 握手阶段校验 token。优先 URL 参数(便于 Worker 代理场景),
  * 其次 HttpOnly Cookie。
+ *
+ * 同时要求请求经过来自 Worker 的共享密钥:否则攻击者可以完全跳过 Worker,
+ * 直连源站的 WebSocket,把人机校验甩在身后。
  */
 wss.on('connection', async (ws, req) => {
+  if (!cameThroughWorker(req)) {
+    ws.close(4003, 'direct_origin_forbidden');
+    return;
+  }
+
   let token = null;
   try {
     const url = new URL(req.url || '/', 'http://localhost');
