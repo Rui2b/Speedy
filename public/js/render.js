@@ -61,6 +61,18 @@ export class GameView {
     this.playersGroup = new THREE.Group();
     this.scene.add(this.gemsGroup, this.petsGroup, this.playersGroup);
 
+    /**
+     * 跑步机踏板。
+     * @type {Map<string, {group: THREE.Group, pads: THREE.Mesh[], machine: object}>}
+     */
+    this.treadmillMeshes = new Map();
+    this.treadmillGroup = new THREE.Group();
+    /** treadmillId -> 到期时间戳,只用于踏板高亮 */
+    this.treadmillActiveUntil = {};
+    /** 服务器下发的跑步机几何,用于本地预测的踏板支撑 */
+    this.treadmillMachines = null;
+    this.scene.add(this.treadmillGroup);
+
     this.buildEnvironment();
     this.selfGroup = this.createPlayerMesh({ skinId: DEFAULT_SKIN, isSelf: true });
     this.selfGroup.visible = false;
@@ -367,6 +379,12 @@ export class GameView {
         this.roster.set(entry.uid, { displayName: entry.displayName, skinId: entry.skinId });
       }
     }
+
+    // 跑步机是场景实体,拿到配置就一次性造出来
+    if (Array.isArray(msg.config?.treadmills)) {
+      this.buildTreadmills(msg.config.treadmills);
+    }
+
     this.lastSnapshotTick = msg.tick ?? 0;
   }
 
@@ -512,6 +530,7 @@ export class GameView {
     this.updatePets(dt);
     this.updateTrails(dt);
     this.updateBlinkers(dt);
+    this.updateTreadmills(this.treadmillActiveUntil);
     if (this.attractMode) this.updateAttractCamera(dt);
     else this.updateCamera(dt);
 
@@ -554,7 +573,26 @@ export class GameView {
   predictMotion(dt, input) {
     if (!this.predictor) return;
     // jump 由输入层在网络层发出后清除,这里直接用当前采样
-    this.predictor.step(dt, input, true);
+    // 跑步机踏板在 lobby 里是实体,预测也要踩在上面,否则会和服务端打架
+    this.predictor.step(dt, input, true, this.supportHeightAt(this.predictor.pos));
+  }
+
+  /**
+   * lobby 里脚下有没有踏板。
+   *
+   * 服务端 world.js 的 treadmillSupportHeight 是同一套规则:
+   * 水平在 AABB 内、且脚底不低于顶面一个容差,就算站在踏板上。
+   * @returns {number|null} 顶面高度;不在踏板上返回 null
+   */
+  supportHeightAt(point) {
+    const machines = this.treadmillMachines;
+    if (!machines) return null;
+    for (const machine of machines) {
+      if (point.x < machine.min.x || point.x > machine.max.x) continue;
+      if (point.z < machine.min.z || point.z > machine.max.z) continue;
+      if (point.y >= machine.max.y - 0.6) return machine.max.y;
+    }
+    return null;
   }
 
   /** 每帧把本地预测位置同步到相机/网格用的旧字段(供相机跟随)。 */
@@ -654,6 +692,123 @@ export class GameView {
       (box.min.z + box.max.z) / 2,
     );
     return mesh;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 跑步机
+   * ------------------------------------------------------------------ */
+  /**
+   * 造一排跑步机。
+   *
+   * 服务器已经决定了"站上去有没有加成",这里只负责让玩家一眼看出
+   * 这是一块可以踩的加速踏板:底板 + 一排亮色踏板 + 侧边扶手。
+   * 全部用基础几何体,Chromebook 上也稳。
+   *
+   * @param {Array<object>} machines 服务器下发的 { id, name, min, max, bonus, gemPrice }
+   */
+  buildTreadmills(machines) {
+    for (const entry of this.treadmillMeshes.values()) {
+      entry.group.removeFromParent();
+      entry.group.traverse((obj) => {
+        obj.geometry?.dispose?.();
+        obj.material?.dispose?.();
+      });
+    }
+    this.treadmillMeshes.clear();
+    this.treadmillGroup.clear();
+
+    if (!Array.isArray(machines)) return;
+
+    this.treadmillMachines = machines;
+
+    for (const machine of machines) {
+      const width = machine.max.x - machine.min.x;
+      const depth = machine.max.z - machine.min.z;
+      const group = new THREE.Group();
+      group.position.set(
+        (machine.min.x + machine.max.x) / 2,
+        0,
+        (machine.min.z + machine.max.z) / 2,
+      );
+
+      // 底板:顶面正好是服务器判定的踏板高度,玩家会站在这个面上
+      const padTop = machine.max.y;
+      const base = new THREE.Mesh(
+        new THREE.BoxGeometry(width, padTop, depth),
+        new THREE.MeshStandardMaterial({
+          color: PALETTE.treadmillBase,
+          roughness: 0.9,
+          metalness: 0.08,
+        }),
+      );
+      base.position.y = padTop / 2;
+      group.add(base);
+
+      // 踏板:沿 z 方向一排,颜色与普通地面完全不同
+      const padCount = 7;
+      const padDepth = (depth - 0.5) / padCount;
+      const pads = [];
+      for (let i = 0; i < padCount; i += 1) {
+        const pad = new THREE.Mesh(
+          new THREE.BoxGeometry(width - 0.5, 0.06, padDepth * 0.82),
+          new THREE.MeshStandardMaterial({
+            color: PALETTE.treadmillPad,
+            roughness: 0.55,
+            metalness: 0.15,
+            emissive: PALETTE.treadmillPad,
+            emissiveIntensity: 0.12,
+          }),
+        );
+        pad.position.set(0, padTop + 0.03, -depth / 2 + 0.25 + padDepth * (i + 0.5));
+        // 动画相位错开,看起来像传送带在动
+        pad.userData.phase = (i / padCount) * Math.PI * 2;
+        pads.push(pad);
+        group.add(pad);
+      }
+
+      // 两侧扶手,把这块区域框出来
+      for (const side of [-1, 1]) {
+        const rail = new THREE.Mesh(
+          new THREE.BoxGeometry(0.12, 0.42, depth),
+          new THREE.MeshStandardMaterial({
+            color: PALETTE.treadmillRail,
+            roughness: 0.5,
+            metalness: 0.35,
+          }),
+        );
+        rail.position.set((side * (width - 0.12)) / 2, padTop + 0.21, 0);
+        group.add(rail);
+      }
+
+      this.treadmillGroup.add(group);
+      this.treadmillMeshes.set(machine.id, { group, pads, machine });
+    }
+  }
+
+  /**
+   * 踏板循环动画 + 已购买的踏板高亮。
+   *
+   * 只改 emissiveIntensity 和很小的缩放,不做任何布局属性动画。
+   * @param {Record<string, number>} activeUntil treadmillId -> 到期时间戳
+   */
+  updateTreadmills(activeUntil = {}, now = performance.now()) {
+    if (this.treadmillMeshes.size === 0) return;
+
+    const t = now * 0.001;
+    for (const [id, entry] of this.treadmillMeshes) {
+      const until = activeUntil[id] ?? 0;
+      const active = until > Date.now();
+
+      for (const pad of entry.pads) {
+        const wave = 0.5 + 0.5 * Math.sin(t * 2.6 + pad.userData.phase);
+        pad.material.emissive.setHex(
+          active ? PALETTE.treadmillPadActive : PALETTE.treadmillPad,
+        );
+        pad.material.emissiveIntensity = active ? 0.35 + wave * 0.45 : 0.08 + wave * 0.12;
+        const scale = active ? 1 + wave * 0.012 : 1;
+        pad.scale.set(scale, 1, scale);
+      }
+    }
   }
 
   /** 消失平台按服务器给的周期显隐。客户端只做视觉,不参与判定。 */
@@ -809,5 +964,25 @@ export class GameView {
     window.removeEventListener('resize', this._onResize);
     this._observer?.disconnect();
     this.renderer.dispose();
+  }
+
+  /** 退出登录:清掉本地玩家模型与拖尾,回到登录前的环绕视角。 */
+  logoutReset() {
+    this.attractMode = true;
+    this.predictor = null;
+    if (this.selfGroup) this.selfGroup.visible = false;
+    for (const entry of this.otherPlayers.values()) entry.group.removeFromParent();
+    this.otherPlayers.clear();
+    for (const mesh of this.gemMeshes.values()) mesh.removeFromParent();
+    this.gemMeshes.clear();
+    for (const entry of this.petMeshes.values()) entry.group.removeFromParent();
+    this.petMeshes.clear();
+    if (this.trail) {
+      this.trail.removeFromParent();
+      this.trail.geometry.dispose();
+      this.trail.material.dispose();
+      this.trail = null;
+      this.trailHistory = [];
+    }
   }
 }

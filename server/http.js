@@ -44,7 +44,7 @@ function setSecurityHeaders(res) {
       "script-src 'self' https://challenges.cloudflare.com",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
-      "connect-src 'self' ws: wss: data: https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://*.cloudflarecaptcha.com",
+      "connect-src 'self' ws: wss: data: blob: https://challenges.cloudflare.com https://*.challenges.cloudflare.com https://*.cloudflarecaptcha.com",
       "font-src 'self'",
       'frame-src https://challenges.cloudflare.com',
       "object-src 'none'",

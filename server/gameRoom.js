@@ -13,7 +13,7 @@
  *   - 宠物孵化计时与跟随
  */
 import { ANTI_CHEAT, GAME, PHYSICS, RULES, TIMING } from './config.js';
-import { LEADERBOARD, OBBY, PETS, ROOMS, SPEED as SPEED_CFG, TREADMILL } from './gameConfig.js';
+import { GEMS, LEADERBOARD, OBBY, PETS, ROOMS, SPEED as SPEED_CFG, TREADMILL } from './gameConfig.js';
 import { createLogger, logCheat } from './logger.js';
 import { CLIENT_MESSAGE, SERVER_MESSAGE, parseClientMessage } from './protocol.js';
 import {
@@ -22,14 +22,19 @@ import {
   recordStrike,
   startCooldown,
   validateGemPickup,
-  validateMovement,
-  validatePetHatch,
+  validateMovement,  validatePetHatch,
   validatePetSteal,
 } from './antiCheat.js';
 import { buildStageRuntime, canEnterStage, serializeStage } from './obby.js';
+import { computeClearReward } from './gems.js';
 import { startHatch } from './pets.js';
 import { RoomManager } from './rooms.js';
-import { tryBuyTreadmill, tryRebirth, treadmillState } from './speedSystem.js';
+import {
+  tryBuyTreadmill,
+  tryRebirth,
+  treadmillContext,
+  treadmillState,
+} from './speedSystem.js';
 import { createPlayerState } from './world.js';
 
 const log = createLogger('room');
@@ -103,22 +108,39 @@ export class GameRoom {
     this.running = true;
     this.lastTickAt = Date.now();
 
-    this.tickTimer = setInterval(() => this.tick(), TIMING.tickMs);
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), TIMING.heartbeatIntervalMs);
+    // 定时器里的异常必须就地吞掉并记录:
+    // setInterval 的回调一旦抛出,整个主循环会永久停止,但进程还活着、
+    // 端口还在监听,表现得像"已宕机"却没有任何报错。
+    this.tickTimer = setInterval(() => {
+      try {
+        this.tick();
+      } catch (err) {
+        log.error('主循环 tick 异常', { message: err?.message, stack: err?.stack });
+      }
+    }, TIMING.tickMs);
+    this.heartbeatTimer = setInterval(() => {
+      try {
+        this.heartbeat();
+      } catch (err) {
+        log.error('心跳异常', { message: err?.message, stack: err?.stack });
+      }
+    }, TIMING.heartbeatIntervalMs);
 
     // 库存与速度攒批落库:5 秒一次,避免每 tick 写库
     this.flushTimer = setInterval(() => {
-      this.store.flushInventory().catch((err) => {
-        log.warn('flushInventory 失败', { message: err.message });
-      });
-      this.flushSpeeds().catch((err) => {
-        log.warn('flushSpeeds 失败', { message: err.message });
-      });
+      this.store
+        .flushInventory()
+        .catch((err) => log.warn('flushInventory 失败', { message: err.message }));
+      this.flushSpeeds().catch((err) => log.warn('flushSpeeds 失败', { message: err.message }));
     }, 5000);
 
     this.cleanupTimer = setInterval(() => {
-      const removed = this.rooms.reclaimIdle();
-      if (removed.length > 0) log.info('回收空房间', { rooms: removed });
+      try {
+        const removed = this.rooms.reclaimIdle();
+        if (removed.length > 0) log.info('回收空房间', { rooms: removed });
+      } catch (err) {
+        log.warn('回收空房间失败', { message: err?.message });
+      }
     }, 60_000);
 
     this.tickTimer.unref?.();
@@ -196,15 +218,7 @@ export class GameRoom {
       this.detach(existing, 'replaced_by_new_session');
     }
 
-    const joined = this.rooms.joinRoom(roomId);
-    if (!joined.room) {
-      ws.send(
-        JSON.stringify({ type: SERVER_MESSAGE.ERROR, code: joined.reason ?? 'room_unavailable' }),
-      );
-      ws.close(1013, joined.reason ?? 'room_unavailable');
-      return null;
-    }
-
+    // 先把 session 建出来,joinRoom 需要它来记录房间创建者
     const session = new Session({
       ws,
       uid: identity.uid,
@@ -213,9 +227,26 @@ export class GameRoom {
       auditId: identity.auditId,
     });
 
+    const joined = this.rooms.joinRoom(roomId, session);
+    if (!joined.room) {
+      ws.send(
+        JSON.stringify({ type: SERVER_MESSAGE.ERROR, code: joined.reason ?? 'room_unavailable' }),
+      );
+      ws.close(1013, joined.reason ?? 'room_unavailable');
+      return null;
+    }
+
     let profile;
+    let starter = { granted: 0, gems: null };
     try {
-      profile = await this.store.loadProfile(identity.uid);
+      // 两次往返代价很高(远程库时尤其明显),并行发出
+      [profile, starter] = await Promise.all([
+        this.store.loadProfile(identity.uid),
+        this.store.grantStarterGems(identity.uid, GEMS.starterGems).catch((err) => {
+          log.warn('发放启动宝石失败', { uid: identity.uid, message: err.message });
+          return { granted: 0, gems: null };
+        }),
+      ]);
     } catch (err) {
       log.error('加载存档失败', { uid: identity.uid, message: err.message });
       ws.close(1011, 'profile_load_failed');
@@ -226,9 +257,14 @@ export class GameRoom {
       uid: identity.uid,
       displayName: identity.displayName,
       skinId: identity.skinId,
-      gems: profile.inventory.gems,
+      // 以 grantStarterGems 读回的余额为准,避免并行读取时的旧值
+      gems: starter.gems ?? profile.inventory.gems,
       save: profile.save,
     });
+
+    if (starter.granted > 0) {
+      log.info('发放启动宝石', { uid: identity.uid, amount: starter.granted });
+    }
 
     joined.room.world.attachPersistedPets(player, profile.pets);
     joined.room.world.addPlayer(player);
@@ -339,6 +375,9 @@ export class GameRoom {
           log.error('切换房间失败', { uid: session.uid, message: err.message });
         });
         return 1;
+      case CLIENT_MESSAGE.DELETE_ROOM:
+        this.doDeleteRoom(session, parsed.payload, now);
+        return 0;
       case CLIENT_MESSAGE.REQUEST_LEADERBOARD:
         this.sendLeaderboard(session);
         return 0;
@@ -541,7 +580,7 @@ export class GameRoom {
       return;
     }
 
-    const joined = this.rooms.joinRoom(targetId);
+    const joined = this.rooms.joinRoom(targetId, session);
     if (!joined.room) {
       session.send(SERVER_MESSAGE.ACTION_RESULT, {
         action: 'join_room',
@@ -572,6 +611,40 @@ export class GameRoom {
     session.send(SERVER_MESSAGE.SELF, this.buildSelfPayload(player, joined.room));
 
     log.info('玩家切换房间', { uid: player.uid, room: joined.room.id });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 删除房间
+   * ------------------------------------------------------------------ */
+  doDeleteRoom(session, payload) {
+    const result = this.rooms.deleteRoom(payload.roomId, session);
+
+    if (!result.ok) {
+      session.send(SERVER_MESSAGE.ACTION_RESULT, {
+        action: 'delete_room',
+        ok: false,
+        reason: result.reason,
+      });
+      return;
+    }
+
+    session.send(SERVER_MESSAGE.ACTION_RESULT, {
+      action: 'delete_room',
+      ok: true,
+      roomId: payload.roomId,
+      movedTo: result.movedTo,
+    });
+    // 房间列表变了,广播给所有人
+    this.broadcastAllRooms();
+    log.info('房间被删除', { uid: session.uid, room: payload.roomId });
+  }
+
+  /** 把最新的房间列表推给所有在线玩家。 */
+  broadcastAllRooms() {
+    const rooms = this.rooms.listRooms();
+    for (const session of this.sessions.values()) {
+      session.send(SERVER_MESSAGE.ROOMS, { rooms });
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -606,39 +679,18 @@ export class GameRoom {
     }
   }
 
-  doPickGem(session, player, payload, now) {
-    const room = this.roomOf(session);
-    if (!room) return;
-
-    const gem = room.world.gems.get(payload.gemId);
-    const check = validateGemPickup(player, gem);
-    if (!check.ok) {
-      logCheat({
-        reason: 'invalid_action',
-        action: 'pick_gem',
-        uid: player.uid,
-        details: { result: check.reason, ...(check.details ?? {}), gemId: payload.gemId },
-      });
-      session.send(SERVER_MESSAGE.ACTION_RESULT, {
-        action: 'pick_gem',
-        ok: false,
-        reason: check.reason,
-      });
-      return;
-    }
-
-    gem.active = false;
-    gem.respawnAt = now + RULES.gemRespawnMs;
-    player.gems += 1;
-    this.store.markGemPickup(player.uid, 1);
-
+  /**
+   * 地面拾取宝石已废弃。
+   *
+   * 宝石改为纯通关奖励(见 gems.js)。这里保留处理以便老客户端不会崩,
+   * 但一律拒绝,并且不给任何宝石。
+   */
+  doPickGem(session, player, payload) {
     session.send(SERVER_MESSAGE.ACTION_RESULT, {
       action: 'pick_gem',
-      ok: true,
-      gemId: gem.gemId,
-      gained: 1,
+      ok: false,
+      reason: 'gems_are_rewards_only',
     });
-    session.send(SERVER_MESSAGE.INVENTORY, { gems: player.gems, pets: this.buildPetList(player) });
   }
 
   async doStealPet(session, player, payload, now) {
@@ -784,29 +836,48 @@ export class GameRoom {
     for (const room of this.rooms.rooms.values()) {
       if (room.playerCount === 0) continue;
 
-      room.world.step(dt, now, this.stages, (event) => this.onStageCleared(room, event));
-      this.broadcastRoom(room, now);
+      // 一个房间出错不能让所有房间停止推进
+      try {
+        room.world.step(dt, now, this.stages, (event) => this.onStageCleared(room, event));
+        this.broadcastRoom(room, now);
 
-      // 排行榜每 10 秒推一次
-      if (this.tickCount % LEADERBOARD.broadcastEveryNTicks === 0) {
-        this.pushLeaderboard(room);
+        // 排行榜每 10 秒推一次
+        if (this.tickCount % LEADERBOARD.broadcastEveryNTicks === 0) {
+          this.pushLeaderboard(room);
+        }
+      } catch (err) {
+        log.error('房间 tick 异常', { room: room.id, message: err?.message, stack: err?.stack });
       }
     }
   }
 
-  /** 通关回调:落库并通知客户端。 */
+  /** 通关回调:落库并发奖励。 */
   onStageCleared(room, { player, stage, elapsedMs }) {
     this.store
-      .completeStage(player.uid, OBBY.worldId, stage.id, elapsedMs)
-      .then((firstTime) => {
+      .completeStage(player.uid, OBBY.worldId, stage.id, elapsedMs, computeClearReward)
+      .then((result) => {
         const session = room.sessions.get(player.uid);
+        // 宝石由数据库事务加过了,把内存里的也同步一下,避免 HUD 落后
+        if (result.totalGems > 0) {
+          player.gems += result.totalGems;
+        }
+
         if (!session) return;
         session.send(SERVER_MESSAGE.ACTION_RESULT, {
           action: 'stage_clear',
           ok: true,
           stage: stage.id,
-          firstTime: Boolean(firstTime),
+          firstTime: result.firstTime,
+          stageGems: result.stageGems,
+          milestoneGems: result.milestoneGems,
+          totalGems: result.totalGems,
+          newMilestones: result.newGroups,
+          clearedCount: result.clearedCount,
           elapsedMs: Math.round(elapsedMs),
+        });
+        session.send(SERVER_MESSAGE.INVENTORY, {
+          gems: player.gems,
+          pets: this.buildPetList(player),
         });
         session.send(SERVER_MESSAGE.PROGRESS, this.buildProgress(player));
       })
@@ -948,6 +1019,7 @@ export class GameRoom {
   }
 
   buildProgress(player) {
+    const now = Date.now();
     return {
       speed: round3(player.speed),
       speedTotal: round3(player.speedTotal),
@@ -956,7 +1028,11 @@ export class GameRoom {
       gems: player.gems,
       location: player.location,
       clearedStages: [...player.clearedStages],
-      treadmills: treadmillState(player, Date.now()),
+      treadmills: treadmillState(player, now),
+      /** 站在哪台跑步机上;没买东西时客户端据此弹提示 */
+      treadmillAt: treadmillContext(player, now),
+      /** 一次购买的有效时长,客户端按它显示"10 分钟" */
+      treadmillSessionMs: TREADMILL.sessionMs,
       rebirthMinSpeed: SPEED_CFG.rebirthMinSpeed,
     };
   }

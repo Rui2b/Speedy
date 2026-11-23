@@ -37,34 +37,36 @@ export const SPEED = {
  * 越贵倍率越高。
  * ------------------------------------------------------------------------- */
 export const TREADMILL = {
-  /** 一次购买的有效时长 */
-  sessionMs: 10 * 60 * 1000,
-  /** 站立判定的高度容差:玩家 y 必须在这个高度以内 */
-  heightTolerance: 1.6,
+  /** 一次购买的有效时长,默认 10 分钟 */
+  sessionMs: num('TREADMILL_SESSION_MINUTES', 10) * 60 * 1000,
+  /** 站立判定的高度容差:玩家脚底必须贴在踏板顶面附近 */
+  heightTolerance: 0.45,
+  /** 踏板高度。玩家会真的站到这块板上,所以它同时是 lobby 的支撑面。 */
+  padHeight: 0.3,
   list: [
     {
       id: 'treadmill-1',
       name: 'Treadmill I',
-      min: { x: -4.4, y: -1, z: -1.8 },
-      max: { x: -1.6, y: 3, z: 1.8 },
-      gemPrice: 5,
-      bonus: 2,
+      min: { x: -4.4, y: 0, z: -1.8 },
+      max: { x: -1.6, y: 0.3, z: 1.8 },
+      gemPrice: num('TREADMILL_1_PRICE', 5),
+      bonus: num('TREADMILL_1_BONUS', 2),
     },
     {
       id: 'treadmill-2',
       name: 'Treadmill II',
-      min: { x: 1.6, y: -1, z: -1.8 },
-      max: { x: 4.4, y: 3, z: 1.8 },
-      gemPrice: 15,
-      bonus: 3.5,
+      min: { x: 1.6, y: 0, z: -1.8 },
+      max: { x: 4.4, y: 0.3, z: 1.8 },
+      gemPrice: num('TREADMILL_2_PRICE', 15),
+      bonus: num('TREADMILL_2_BONUS', 3.5),
     },
     {
       id: 'treadmill-3',
       name: 'Treadmill III',
-      min: { x: 7.5, y: -1, z: -1.8 },
-      max: { x: 10.3, y: 3, z: 1.8 },
-      gemPrice: 40,
-      bonus: 6,
+      min: { x: 7.5, y: 0, z: -1.8 },
+      max: { x: 10.3, y: 0.3, z: 1.8 },
+      gemPrice: num('TREADMILL_3_PRICE', 40),
+      bonus: num('TREADMILL_3_BONUS', 6),
     },
   ],
 };
@@ -85,6 +87,12 @@ export const TREADMILL = {
  *   checkpoints  到达即更新重生点
  *   goal         通关触发区域
  *   quizGate     预留字段:你的网站已有答题系统,这里不用,留空即可
+ *
+ * 跳跃可达性(PLAYER_JUMP_IMPULSE 7.5 / PLAYER_GRAVITY 22):
+ *   最高点 1.28 单位、用时 0.34s,最高水平速度 6 单位/s。
+ *   因此「上升 ≤ 0.7、水平间隙 ≤ 2.0」一定过得去,平坦间隙上限约 4.0。
+ *   任何平台之间的距离超过这个范围,玩家就永远过不去;
+ *   改关卡几何时必须按这条约束检查。
  * ------------------------------------------------------------------------- */
 export const OBBY = {
   worldId: 'speed-escape',
@@ -99,16 +107,16 @@ export const OBBY = {
       deathY: -12,
       platforms: [
         { id: 's1-start', min: { x: -4, y: 0, z: -6 }, max: { x: 4, y: 0.5, z: 2 }, kind: 'solid' },
-        { id: 's1-jump1', min: { x: -3, y: 1.2, z: -12 }, max: { x: 3, y: 1.7, z: -8 }, kind: 'solid' },
-        { id: 's1-jump2', min: { x: -2, y: 2.4, z: -18 }, max: { x: 4, y: 2.9, z: -14 }, kind: 'solid' },
-        { id: 's1-goal', min: { x: -3, y: 3.6, z: -25 }, max: { x: 3, y: 4.1, z: -21 }, kind: 'solid' },
+        { id: 's1-jump1', min: { x: -3, y: 0.5, z: -11 }, max: { x: 3, y: 1.1, z: -8 }, kind: 'solid' },
+        { id: 's1-jump2', min: { x: -3, y: 1.1, z: -16 }, max: { x: 3, y: 1.7, z: -13 }, kind: 'solid' },
+        { id: 's1-goal', min: { x: -3, y: 1.7, z: -22 }, max: { x: 3, y: 2.3, z: -18 }, kind: 'solid' },
       ],
       blinkers: [],
       checkpoints: [
         { x: 0, y: 0.5, z: -2 },
-        { x: 0, y: 1.7, z: -10 },
+        { x: 0, y: 1.7, z: -14.5 },
       ],
-      goal: { min: { x: -3, y: 3.6, z: -25 }, max: { x: 3, y: 6, z: -21 } },
+      goal: { min: { x: -3, y: 1.7, z: -22 }, max: { x: 3, y: 4.5, z: -18 } },
     },
     {
       id: 2,
@@ -118,33 +126,41 @@ export const OBBY = {
       deathY: -12,
       platforms: [
         { id: 's2-start', min: { x: -4, y: 0, z: -6 }, max: { x: 4, y: 0.5, z: 2 }, kind: 'solid' },
-        { id: 's2-mid', min: { x: -3, y: 1.6, z: -16 }, max: { x: 3, y: 2.1, z: -11 }, kind: 'solid' },
-        { id: 's2-goal', min: { x: -3, y: 3.4, z: -26 }, max: { x: 3, y: 3.9, z: -21 }, kind: 'solid' },
+        { id: 's2-mid', min: { x: -3, y: 0.6, z: -14 }, max: { x: 3, y: 1.2, z: -11 }, kind: 'solid' },
+        { id: 's2-goal', min: { x: -3, y: 1.8, z: -23 }, max: { x: 3, y: 2.4, z: -20 }, kind: 'solid' },
       ],
       blinkers: [
-        // 两块交替出现的平台,必须踩准节奏
+        // 两块交替出现的平台,是同一段路的左右两条线
         {
           id: 's2-blink-a',
-          min: { x: -2.4, y: 0.8, z: -9.2 },
-          max: { x: -0.4, y: 1.1, z: -7.2 },
+          min: { x: -2.4, y: 0.1, z: -9 },
+          max: { x: -0.4, y: 0.7, z: -7.5 },
           periodMs: 3200,
           enabledMs: 1600,
           phaseMs: 0,
         },
         {
           id: 's2-blink-b',
-          min: { x: 0.4, y: 1.2, z: -9.2 },
-          max: { x: 2.4, y: 1.5, z: -7.2 },
+          min: { x: 0.4, y: 0.1, z: -9 },
+          max: { x: 2.4, y: 0.7, z: -7.5 },
           periodMs: 3200,
           enabledMs: 1600,
           phaseMs: 1600,
         },
+        {
+          id: 's2-blink-c',
+          min: { x: -2, y: 1.2, z: -18 },
+          max: { x: 2, y: 1.8, z: -16 },
+          periodMs: 3200,
+          enabledMs: 1600,
+          phaseMs: 800,
+        },
       ],
       checkpoints: [
         { x: 0, y: 0.5, z: -2 },
-        { x: 0, y: 2.1, z: -13 },
+        { x: 0, y: 1.2, z: -12.5 },
       ],
-      goal: { min: { x: -3, y: 3.4, z: -26 }, max: { x: 3, y: 6, z: -21 } },
+      goal: { min: { x: -3, y: 1.8, z: -23 }, max: { x: 3, y: 4.6, z: -20 } },
     },
     {
       id: 3,
@@ -154,30 +170,30 @@ export const OBBY = {
       deathY: -12,
       platforms: [
         { id: 's3-start', min: { x: -4, y: 0, z: -6 }, max: { x: 4, y: 0.5, z: 2 }, kind: 'solid' },
-        { id: 's3-mid', min: { x: -3, y: 2.2, z: -20 }, max: { x: 3, y: 2.7, z: -15 }, kind: 'solid' },
-        { id: 's3-goal', min: { x: -3, y: 4.2, z: -30 }, max: { x: 3, y: 4.7, z: -25 }, kind: 'solid' },
+        { id: 's3-mid', min: { x: -3, y: 1.2, z: -21 }, max: { x: 3, y: 1.8, z: -17 }, kind: 'solid' },
+        { id: 's3-goal', min: { x: -3, y: 2.0, z: -27 }, max: { x: 3, y: 2.6, z: -24 }, kind: 'solid' },
       ],
       blinkers: [
         {
           id: 's3-blink-a',
-          min: { x: -2.6, y: 0.9, z: -9.4 },
-          max: { x: -0.6, y: 1.2, z: -7.4 },
+          min: { x: -3, y: 0, z: -10.5 },
+          max: { x: 3, y: 0.5, z: -7.5 },
           periodMs: 2400,
           enabledMs: 1000,
           phaseMs: 0,
         },
         {
           id: 's3-blink-b',
-          min: { x: 0.6, y: 1.8, z: -12.4 },
-          max: { x: 2.6, y: 2.1, z: -10.4 },
+          min: { x: -3, y: 0.6, z: -14.5 },
+          max: { x: 3, y: 1.1, z: -11.5 },
           periodMs: 2400,
           enabledMs: 1000,
           phaseMs: 800,
         },
         {
           id: 's3-blink-c',
-          min: { x: -2.6, y: 3.0, z: -18.4 },
-          max: { x: -0.6, y: 3.3, z: -16.4 },
+          min: { x: -3, y: 1.2, z: -17.5 },
+          max: { x: 3, y: 1.7, z: -15.5 },
           periodMs: 2400,
           enabledMs: 1000,
           phaseMs: 1600,
@@ -185,9 +201,9 @@ export const OBBY = {
       ],
       checkpoints: [
         { x: 0, y: 0.5, z: -2 },
-        { x: 0, y: 2.7, z: -17 },
+        { x: 0, y: 1.8, z: -19 },
       ],
-      goal: { min: { x: -3, y: 4.2, z: -30 }, max: { x: 3, y: 6.5, z: -25 } },
+      goal: { min: { x: -3, y: 2.0, z: -27 }, max: { x: 3, y: 4.8, z: -24 } },
     },
   ],
 };
@@ -211,6 +227,32 @@ export const PETS = {
   syncEveryNTicks: 5,
   /** 在 lobby 里刷多少个野生蛋 */
   wildEggCount: 8,
+};
+
+/* ------------------------------------------------------------------------- *
+ * 宝石经济
+ *
+ * 宝石只有三个来源,全部服务端发放:
+ *   1. 每关首次通关(重复通关不再给)
+ *   2. 每累计 N 个新关卡发一次里程碑
+ *   3. 新账号一次性启动宝石
+ *
+ * 曲线用对数,前期涨得快、后期收敛,不会出现天文数字。
+ * 跑步机、speed、转生、挂机都不产出宝石。
+ * ------------------------------------------------------------------------- */
+export const GEMS = {
+  /** 单关首通奖励 = floor(baseReward * ln(stage + 1)) */
+  baseReward: num('GEMS_BASE_REWARD', 3),
+  /** 单关奖励上限,防后期爆炸 */
+  maxPerStage: num('GEMS_MAX_PER_STAGE', 16),
+  /** 里程碑:每累计这么多个新关卡触发一次 */
+  milestoneEvery: num('GEMS_MILESTONE_EVERY', 10),
+  /** 里程碑奖励 = floor(milestoneBase * ln(group + 1)) */
+  milestoneBase: num('GEMS_MILESTONE_BASE', 12),
+  /** 里程碑上限 */
+  maxPerMilestone: num('GEMS_MAX_PER_MILESTONE', 40),
+  /** 新账号启动宝石(只发一次) */
+  starterGems: num('GEMS_STARTER', 15),
 };
 
 /* ------------------------------------------------------------------------- *

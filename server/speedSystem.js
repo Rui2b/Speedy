@@ -17,26 +17,38 @@ export function isMoving(player) {
 }
 
 /**
- * 找玩家当前站的跑步机。
- *
- * 只按水平位置 + 高度容差判定:必须真的站在跑步机上,站在旁边蹭不到加成。
- * 时段过期的跑步机不算。
+ * 找玩家当前站的跑步机(不看是否已购买时段)。
+ * 用于"站在上面但没买"的提示:视觉上可以站上去,但没有加成。
  */
-export function treadmillUnder(player, nowMs) {
+export function treadmillStandingOn(player) {
   const feet = player.pos;
   for (const machine of TREADMILL.list) {
     if (feet.x < machine.min.x || feet.x > machine.max.x) continue;
     if (feet.z < machine.min.z || feet.z > machine.max.z) continue;
 
-    // 必须贴在跑步机表面高度附近
-    if (Math.abs(feet.y - machine.max.y) > TREADMILL.heightTolerance) continue;
-
-    const until = player.treadmillUntil?.get(machine.id) ?? 0;
-    if (nowMs >= until) continue;
+    // 脚底必须贴在踏板顶面一个容差以内:跳在空中或陷进板里都不算
+    if (feet.y < machine.max.y - TREADMILL.heightTolerance) continue;
+    if (feet.y > machine.max.y + TREADMILL.heightTolerance) continue;
 
     return machine;
   }
   return null;
+}
+
+/**
+ * 找玩家当前站的、且已购买有效时段的跑步机。
+ *
+ * 只按水平位置 + 高度容差判定:必须真的站在跑步机上,站在旁边蹭不到加成。
+ * 时段过期的跑步机不算 —— 时长耗尽立刻失去倍率。
+ */
+export function treadmillUnder(player, nowMs) {
+  const machine = treadmillStandingOn(player);
+  if (!machine) return null;
+
+  const until = player.treadmillUntil?.get(machine.id) ?? 0;
+  if (nowMs >= until) return null;
+
+  return machine;
 }
 
 /**
@@ -121,6 +133,27 @@ export function treadmillState(player, nowMs) {
     out[machine.id] = until > nowMs ? until : 0;
   }
   return out;
+}
+
+/**
+ * 玩家站在哪台跑步机上,以及它此刻有没有加成。
+ * 客户端用它弹购买面板 / 显示"未购买"提示。
+ *
+ * @returns {{id: string, name: string, bonus: number, gemPrice: number, active: boolean, untilMs: number}|null}
+ */
+export function treadmillContext(player, nowMs) {
+  const machine = treadmillStandingOn(player);
+  if (!machine) return null;
+
+  const until = player.treadmillUntil?.get(machine.id) ?? 0;
+  return {
+    id: machine.id,
+    name: machine.name,
+    bonus: machine.bonus,
+    gemPrice: machine.gemPrice,
+    active: until > nowMs,
+    untilMs: until > nowMs ? until : 0,
+  };
 }
 
 /** 重力/地面常量,给需要判断离地的模块复用。 */

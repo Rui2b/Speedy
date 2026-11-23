@@ -36,7 +36,20 @@ class NullStore {
   async saveSpeeds() {}
   async markHatchStarted() {}
   async completeStage() {
-    return false;
+    return {
+      firstTime: false,
+      stageGems: 0,
+      milestoneGems: 0,
+      newGroups: [],
+      totalGems: 0,
+      clearedCount: 0,
+    };
+  }
+  async grantStarterGems() {
+    return { granted: 0, gems: null };
+  }
+  async loadProgressSummary() {
+    return { clearedCount: 0, claimedGroups: [] };
   }
   async stealPet() {
     return false;
@@ -234,26 +247,171 @@ export class PgStore {
   }
 
   /**
-   * 记录一个 stage 通关。已通关的不再重复写。
-   * @returns {Promise<boolean>} 本次是否是新通关
+   * 记录一个 stage 通关,并在首次通关时发放宝石。
+   *
+   * 整个过程在一个事务里:
+   *   1. upsert player_progress,拿到"是否首次通关"
+   *   2. 首次通关 → 按曲线发该关宝石,标记 first_gems_rewarded
+   *   3. 统计累计通关数,发放还没领过的里程碑
+   *   4. 宝石加进 player_inventory
+   *
+   * @param {string} uid
+   * @param {string} world
+   * @param {number} stage
+   * @param {number} timeMs
+   * @param {(params: object) => object} computeReward gems.js 的 computeClearReward
+   * @returns {Promise<{firstTime: boolean, stageGems: number, milestoneGems: number, newGroups: number[], totalGems: number, clearedCount: number}>}
    */
-  async completeStage(uid, world, stage, timeMs) {
-    const { rowCount } = await this.pool.query(
-      `INSERT INTO player_progress (uid, world, stage, is_completed, best_time_ms, completed_at)
-       VALUES ($1, $2, $3, true, $4, now())
-       ON CONFLICT (uid, world, stage)
-       DO UPDATE SET is_completed = true,
-                     best_time_ms = LEAST(
-                       COALESCE(player_progress.best_time_ms, EXCLUDED.best_time_ms),
-                       EXCLUDED.best_time_ms
-                     ),
-                     completed_at = COALESCE(player_progress.completed_at, now()),
-                     updated_at = now()
-       WHERE player_progress.is_completed = false`,
-      [uid, world, stage, Math.max(0, Math.round(timeMs ?? 0))],
+  async completeStage(uid, world, stage, timeMs, computeReward) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 先看这一关之前是否已通关,以及奖励是否已发
+      const before = await client.query(
+        `SELECT is_completed, first_gems_rewarded
+           FROM player_progress WHERE uid = $1 AND world = $2 AND stage = $3
+           FOR UPDATE`,
+        [uid, world, stage],
+      );
+      const wasCompleted = before.rows[0]?.is_completed === true;
+      const alreadyRewarded = before.rows[0]?.first_gems_rewarded === true;
+      const firstTime = !wasCompleted || !alreadyRewarded;
+
+      // 写入/更新进度
+      await client.query(
+        `INSERT INTO player_progress (uid, world, stage, is_completed, best_time_ms, completed_at)
+         VALUES ($1, $2, $3, true, $4, now())
+         ON CONFLICT (uid, world, stage)
+         DO UPDATE SET is_completed = true,
+                       best_time_ms = LEAST(
+                         COALESCE(player_progress.best_time_ms, EXCLUDED.best_time_ms),
+                         EXCLUDED.best_time_ms
+                       ),
+                       completed_at = COALESCE(player_progress.completed_at, now()),
+                       updated_at = now()`,
+        [uid, world, stage, Math.max(0, Math.round(timeMs ?? 0))],
+      );
+
+      // 累计已通关的不同关卡数
+      const countRes = await client.query(
+        `SELECT count(*)::int AS n FROM player_progress
+          WHERE uid = $1 AND is_completed = true`,
+        [uid],
+      );
+      const clearedCount = countRes.rows[0]?.n ?? 0;
+
+      // 已经领过的里程碑分组
+      const claimedRes = await client.query(
+        'SELECT group_index FROM player_milestones WHERE uid = $1',
+        [uid],
+      );
+      const alreadyClaimedGroups = claimedRes.rows.map((r) => r.group_index);
+
+      const reward = computeReward({
+        stage,
+        firstTime,
+        clearedCountAfter: clearedCount,
+        alreadyClaimedGroups,
+      });
+
+      // 发放本关首通宝石
+      if (reward.stageGems > 0) {
+        await client.query(
+          `UPDATE player_progress
+              SET first_gems_rewarded = true, gems_rewarded = $4, updated_at = now()
+            WHERE uid = $1 AND world = $2 AND stage = $3`,
+          [uid, world, stage, reward.stageGems],
+        );
+      }
+
+      // 记录并发放里程碑:每个新分组各占一行,金额按组均分记录
+      if (reward.newGroups.length > 0) {
+        const perGroup = Math.floor(reward.milestoneGems / reward.newGroups.length);
+        for (const group of reward.newGroups) {
+          await client.query(
+            `INSERT INTO player_milestones (uid, group_index, gems_rewarded)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (uid, group_index) DO NOTHING`,
+            [uid, group, perGroup],
+          );
+        }
+      }
+
+      // 加宝石
+      if (reward.total > 0) {
+        await client.query(
+          `UPDATE player_inventory
+              SET gems = gems + $2, gems_earned = gems_earned + $2, updated_at = now()
+            WHERE uid = $1`,
+          [uid, reward.total],
+        );
+      }
+
+      await client.query('COMMIT');
+
+      return {
+        firstTime,
+        stageGems: reward.stageGems,
+        milestoneGems: reward.milestoneGems,
+        newGroups: reward.newGroups,
+        totalGems: reward.total,
+        clearedCount,
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * 新账号发放启动宝石(只发一次)。
+   * @returns {Promise<number>} 实际发放数量,已发过返回 0
+   */
+  /**
+   * 新账号一次性启动宝石。
+   *
+   * 一条语句内完成"抢占标记 + 加宝石 + 读回余额",既不会重复发,
+   * 也不会和并发的 loadProfile 抢出重复计数的竞态。
+   *
+   * @returns {Promise<{granted: number, gems: number|null}>}
+   *   granted 实际发放数量(已领过为 0);gems 加完之后的权威宝石数
+   */
+  async grantStarterGems(uid, amount) {
+    const res = await this.pool.query(
+      `WITH claimed AS (
+         UPDATE users SET starter_gems_granted = true
+          WHERE uid = $1 AND starter_gems_granted = false
+          RETURNING uid
+       )
+       UPDATE player_inventory i
+          SET gems = i.gems + CASE WHEN EXISTS (SELECT 1 FROM claimed) THEN $2::int ELSE 0 END,
+              gems_earned = i.gems_earned + CASE WHEN EXISTS (SELECT 1 FROM claimed) THEN $2::int ELSE 0 END,
+              updated_at = now()
+        WHERE i.uid = $1
+        RETURNING i.gems, EXISTS (SELECT 1 FROM claimed) AS granted`,
+      [uid, amount],
     );
-    // 只统计"从 false 变 true"的那一次
-    return rowCount > 0;
+    const row = res.rows[0];
+    if (!row) return { granted: 0, gems: null };
+    return { granted: row.granted ? amount : 0, gems: Number(row.gems) };
+  }
+
+  /** 读一个玩家的累计通关数与已领里程碑,用于下发 HUD。 */
+  async loadProgressSummary(uid) {
+    const [countRes, milestones] = await Promise.all([
+      this.pool.query(
+        'SELECT count(*)::int AS n FROM player_progress WHERE uid = $1 AND is_completed = true',
+        [uid],
+      ),
+      this.pool.query('SELECT group_index FROM player_milestones WHERE uid = $1', [uid]),
+    ]);
+    return {
+      clearedCount: countRes.rows[0]?.n ?? 0,
+      claimedGroups: milestones.rows.map((r) => r.group_index),
+    };
   }
 
   /** 批量保存速度(可选:定时落库,降低崩溃丢失) */

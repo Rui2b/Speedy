@@ -29,6 +29,10 @@ export class Hud {
     this.el.hud.hidden = true;
     this.el.controls.hidden = true;
     this.el.pets.hidden = true;
+    this.lastPetsKey = '';
+    this.el.pets.replaceChildren();
+    this.el.toast.hidden = true;
+    this.el.toast.className = 'toast';
   }
 
   setGems(value) {

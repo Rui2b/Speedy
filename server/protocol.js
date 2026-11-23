@@ -20,6 +20,8 @@ export const CLIENT_MESSAGE = {
   EXIT_STAGE: 'exit_stage',
   /** 切换房间 */
   JOIN_ROOM: 'join_room',
+  /** 删除自己创建的房间 */
+  DELETE_ROOM: 'delete_room',
   /** 请求排行榜 / 房间列表 */
   REQUEST_LEADERBOARD: 'request_leaderboard',
   REQUEST_ROOMS: 'request_rooms',
@@ -43,6 +45,8 @@ export const SERVER_MESSAGE = {
   LEADERBOARD: 'leaderboard',
   /** 房间列表 */
   ROOMS: 'rooms',
+  /** 房间被删除,房内玩家被送回公共大厅 */
+  ROOM_CLOSED: 'room_closed',
   /** 关卡几何与当前进度 */
   STAGE: 'stage_state',
   KICK: 'kick',
@@ -101,6 +105,8 @@ export function parseClientMessage(raw) {
       return { type, payload: {} };
     case CLIENT_MESSAGE.JOIN_ROOM:
       return parseJoinRoom(data);
+    case CLIENT_MESSAGE.DELETE_ROOM:
+      return parseDeleteRoom(data);
     case CLIENT_MESSAGE.PONG:
     case CLIENT_MESSAGE.PING:
     case CLIENT_MESSAGE.HELLO:
@@ -136,6 +142,15 @@ function parseJoinRoom(data) {
     return { error: 'bad_room_id' };
   }
   return { type: CLIENT_MESSAGE.JOIN_ROOM, payload: { roomId: roomId.trim().toLowerCase() } };
+}
+
+/** 删除房间。权限(创建者、非公共、非当前房间)由服务端再次校验。 */
+function parseDeleteRoom(data) {
+  if (!isSafeId(data.roomId, 24)) return { error: 'bad_room_id' };
+  return {
+    type: CLIENT_MESSAGE.DELETE_ROOM,
+    payload: { roomId: String(data.roomId).trim().toLowerCase() },
+  };
 }
 
 /**

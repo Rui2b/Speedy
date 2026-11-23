@@ -235,7 +235,11 @@ async function main() {
   const b = await Peer.login(nameB, password);
   check('both players connected', Boolean(a.welcome && b.welcome), `A=${a.uid.slice(0, 8)} B=${b.uid.slice(0, 8)}`);
 
-  const snap = await b.waitFor((m) => m.type === 'world_snapshot');
+  // 宠物位置只在本帧是全量同步帧时才下发,所以要等到一条带 pets 的快照
+  const snap = await b.waitFor(
+    (m) => m.type === 'world_snapshot' && Array.isArray(m.pets),
+    10000,
+  );
   const wildPets = snap.pets.filter((p) => p.ownerUid === null);
   check('wild pets exist', wildPets.length > 0, `count=${wildPets.length}`);
 
@@ -248,7 +252,7 @@ async function main() {
   check('wild pets cannot be stolen', wildResult.ok === false && wildResult.reason === 'pet_wild', `reason=${wildResult.reason}`);
 
   // 自己的宠物不能偷
-  const selfSnap = await a.waitFor((m) => m.type === 'world_snapshot');
+  const selfSnap = await a.waitFor((m) => m.type === 'world_snapshot' && Array.isArray(m.pets), 10000);
   const ownPet = selfSnap.pets.find((p) => p.ownerUid === a.uid);
   if (ownPet) {
     a.send({ type: 'try_steal_pet', petId: ownPet.petId });
@@ -293,7 +297,7 @@ async function main() {
 
   if (granted) {
     const ownerPeer = await Peer.login(`own_${suffix}`, password);
-    const snap2 = await ownerPeer.waitFor((m) => m.type === 'world_snapshot');
+    const snap2 = await ownerPeer.waitFor((m) => m.type === 'world_snapshot' && Array.isArray(m.pets), 10000);
     const ownedPet = snap2.pets.find((p) => p.ownerUid === ownerPeer.uid);
     check('owner sees the granted pet', Boolean(ownedPet));
 

@@ -127,8 +127,9 @@ export class LocalPredictor {
    * @param {number} dt 秒
    * @param {{moveX:number,moveZ:number,jump:boolean}} input
    * @param {boolean} hasInput 是否收到过输入(没收到就不要自己乱动)
+   * @param {number|null} [supportY] 脚下支撑面高度(跑步机踏板);null 用默认地面
    */
-  step(dt, input, hasInput = true) {
+  step(dt, input, hasInput = true, supportY = null) {
     if (hasInput) {
       const next = stepHorizontal(this.vel, input, dt, this.onGround, this.phys);
       this.vel.x = next.vx;
@@ -145,8 +146,9 @@ export class LocalPredictor {
       this.pos.z += this.vel.z * dt;
       this.pos.y += this.vel.y * dt;
 
-      if (this.pos.y <= 0 && this.vel.y <= 0) {
-        this.pos.y = 0;
+      const floor = supportY === null ? this.phys.groundY ?? 0 : supportY;
+      if (this.pos.y <= floor && this.vel.y <= 0) {
+        this.pos.y = floor;
         this.vel.y = 0;
         this.onGround = true;
       }

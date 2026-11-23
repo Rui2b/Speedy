@@ -1,6 +1,6 @@
 # Speedy
 
-面向 Chromebook 的 3D 网页多人小游戏:跑步、挑战、宠物孵化、偷别人宠物、收集宝石。
+面向 Chromebook 的 3D 网页多人小游戏:跑步、闯关拿宝石、宠物孵化、偷别人宠物。
 
 前端 Three.js，后端 Node.js + 原生 `ws`，数据库 PostgreSQL。**服务器权威模拟**，客户端只上报输入。
 
@@ -12,6 +12,7 @@
 - [本地跑通（3 分钟）](#本地跑通3-分钟)
 - [生产部署（Oracle Cloud / Ubuntu 22.04）](#生产部署)
 - [Cloudflare Worker 网关](#cloudflare-worker-网关)
+- [本轮迭代改动(P0–P3)](#本轮迭代改动p0p3)
 - [配置项](#配置项)
 - [测试流程](#测试流程)
 - [作弊测试用例](#作弊测试用例)
@@ -148,7 +149,7 @@ DATABASE_URL=... node test/multiplayer.mjs   # 14 项:偷宠物、冷却、权�
 | --- | --- |
 | `W` `A` `S` `D` | 移动 |
 | `Space` | 跳跃 |
-| `E` | 拾取宝石 / 偷别人的宠物 |
+| `E` | 偷别人的宠物 / 孵化蛋 |
 | `F` | 孵化自己的宠物 |
 
 ---
@@ -362,6 +363,93 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 
 ---
 
+## 本轮迭代改动(P0–P3)
+
+按 `agent-plan.txt` 的优先级做完 P0–P3,并各自配套自动化测试。
+
+### P0 退出登录与会话失效
+
+- 计分板右上角显示当前用户名 + `Log out` 按钮
+- 手动退出:先断 WebSocket → 再 `POST /api/logout` 清 cookie → 回登录页
+- 同账号在别处登录:旧连接被 `4001` 关闭,客户端自动退出并提示"会话已失效"
+- 退出后 Turnstile 的 token 已作废,必须重新拿一个新挑战
+
+**踩过的坑**:`.scoreboard` 是 `pointer-events: none`(为了不挡 canvas),
+所以按钮必须显式加回 `pointer-events: auto`,否则点不到。
+
+### P1 房间系统与删除权限
+
+- 房间记录创建者(`createdByUid` / `createdByName`)与是否公共(`isPublic`)
+- 删除权限链(全部服务端校验):房间存在 → 不是公共大厅 → 请求者是创建者 →
+  不是自己当前所在的房间
+- 房主删房后,房内所有人被送回 `lobby-1` 并收到 `room_closed` 通知
+- 客户端的 Delete 按钮只做 UI 拦截,真正的判定在服务端
+
+### P2 宝石经济重做(宝石只来自首通)
+
+- **移除全部地面宝石**:地图上不再刷可拾取宝石,`try_pick_gem` 一律拒绝
+- 宝石来源只有两个:
+  - 首次通关:`floor(3 × ln(stage + 1))`,上限 16
+  - 里程碑:每累计 10 个新关卡,`floor(12 × ln(group + 1))`,上限 40,每个里程碑只发一次
+- 新账号一次性 15 颗启动宝石(`users.starter_gems_granted` 保证只发一次,
+  迁移会把已有账号标记为已领,不补发)
+- 跑步机、speed 成长、转生、挂机都**不产宝石**
+- 通关结算文案:
+  - 首通:`First clear. +N gems (a stage + b milestone)`,并浮出奖惩小卡片
+  - 重复:`Stage cleared again. No more gems from this stage, but speed still counts.`
+
+关键实现:`store.completeStage()` 在一个事务里锁行、判首通、算奖励、记里程碑、
+加宝石,避免并发重复发奖。
+
+**修掉的真实 bug**:`world.js` 在关卡里脚下没有平台时会回退到 lobby 地面高度,
+相当于关卡里有一块看不见的地板,玩家永远掉不到 `deathY`,
+`isFallen` 永不触发。现在没有平台时传 `-Infinity`。
+
+### P3 跑步机重做
+
+- 三台跑步机在 lobby 同一区域**并列成实体踏板**:底板 + 一排亮色踏板 + 侧边扶手,
+  玩家会真的站上去(服务器把踏板顶面当作支撑面)
+- 踏板颜色明显区别于普通地面,并有错相位的循环呼吸动画,已购买时高亮
+- 权限:**只有买过时长的玩家才吃倍率**。没买可以站上去,但增速不变,
+  客户端弹出"Spend N gems for 10 minutes of 2× speed. Standing here does nothing until you buy it."
+- 时长 10 分钟(可用 `TREADMILL_SESSION_MINUTES` 调),三档价格 5 / 15 / 40,
+  倍率 2× / 3.5× / 6×,全部可用环境变量覆盖
+- 时长耗尽立刻失去倍率(`treadmillUnder` 按时间戳判定,不是缓存)
+
+**修掉的真实 bug**:跑步机 AABB 原本是 `y: -1 … 3`,而站立判定拿 `max.y` 当踏板面,
+玩家脚底在 y=0 时永远差 3 米,判定从不命中 —— 也就是这个功能从第一版起就没生效过。
+现在踏板是 `y: 0 … 0.3` 的真实薄板。
+
+### 顺带修掉的稳定性问题
+
+- **计时器异常会让主循环静默死掉**:`setInterval` 的回调一旦抛出,整个 tick 循环
+  永久停止,但进程还在、端口还在监听,表现为"服务没挂但所有人都卡住"。
+  现在 tick / 心跳 / 清理都各自 try-catch 记录,并且单个房间出错不影响其它房间。
+- **崩溃退出码为 0**:`uncaughtException` 原来走 `process.exit(0)`,systemd 会当成
+  正常停止而不重启。现在以 1 退出。
+- **关卡几何不可达**:修完上面那条掉落 bug 后暴露出 Stage 2/3 的台阶间隔
+  远超跳跃能力(最高 1.28 单位 / 滞空 0.68s),玩家永远通不了关。
+  重排了三关几何,并新增 `test/stage-geometry.mjs`,用真实积分物理跑贪心机器人,
+  改关卡时能立刻发现"这关过不去"。
+- **重复通关没有反馈**:`clearedStages` 是永久的 Set,导致第二次通关根本不触发回调。
+  现在改成"每轮进入关卡触发一次",是否发宝石交给数据库判断。
+
+### 新增配置项
+
+全部进了 [`.env.example`](.env.example):
+
+```
+TREADMILL_SESSION_MINUTES=10
+TREADMILL_1_PRICE=5     TREADMILL_1_BONUS=2
+TREADMILL_2_PRICE=15    TREADMILL_2_BONUS=3.5
+TREADMILL_3_PRICE=40    TREADMILL_3_BONUS=6
+GEMS_BASE_REWARD=3      GEMS_MAX_PER_STAGE=16
+GEMS_MILESTONE_EVERY=10 GEMS_MILESTONE_BASE=12 GEMS_MAX_PER_MILESTONE=40
+GEMS_STARTER=15
+```
+
+---
+
 ## 配置项
 
 所有可调参数集中在 [`server/config.js`](server/config.js) 与 [`server/gameConfig.js`](server/gameConfig.js),并支持环境变量覆盖:
@@ -405,7 +493,7 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 | 机制 | 说明 |
 | --- | --- |
 | **Speed** | 玩家权威速度向量长度超过阈值时,每 tick 累加 `baseGain × multiplier`。站着不动不涨。 |
-| **跑步机** | lobby 里三台,站上去且处于有效时段内,增量再乘倍率。用宝石买 10 分钟:5 / 15 / 40 颗。 |
+| **跑步机** | lobby 里三台并列摆放,踩上去是实体踏板。**只有买过时长的玩家**才吃倍率;没买可以站上去,但没有加成。用宝石买 10 分钟:5 / 15 / 40 颗,倍率分别 2× / 3.5× / 6×。 |
 | **Rebirth** | speed 达到门槛后可转生:清空 speed、rebirth+1、倍率 ×1.5、回到 lobby 出生点。 |
 | **Obby** | 1 个 World × 3 个 Stage。进关需要达到 `minSpeed`,掉落回最近检查点,踩到 goal 通关。 |
 | **排行榜** | 按 rebirth → 累计 speed → 通关数排序,每 10 秒推送一次。 |
@@ -436,6 +524,19 @@ Worker 不解析任何业务消息，只搬运字节并协调关闭码。
 - `player_progress`: 每玩家每关卡的通关状态
 - `pets`: `is_egg`、`hatched_at`、`hatch_started_at`
 
+本轮再加一个 [`db/migrate-gem-economy.sql`](db/migrate-gem-economy.sql)(同样幂等、不删数据):
+
+- `player_progress`: `first_gems_rewarded`、`gems_rewarded` —— 首通宝石只发一次
+- `player_milestones`: 累计通关里程碑的领取记录,每个里程碑只发一次
+- `users`: `starter_gems_granted` —— 启动宝石只发一次;迁移会把已有账号标记成已领,不补发
+
+两个脚本都要跑:
+
+```bash
+DATABASE_URL=... node scripts/migrate.js db/migrate-speed-obby.sql
+DATABASE_URL=... node scripts/migrate.js db/migrate-gem-economy.sql
+```
+
 应用方式:
 
 ```bash
@@ -451,19 +552,19 @@ DATABASE_URL=... node scripts/migrate.js db/migrate-speed-obby.sql
 ```bash
 npm start &
 node test/e2e.mjs          # 26 项:协议 / 鉴权 / 物理 / 防作弊
-node test/progression.mjs  # 23 项:成长 / 转生 / 跑步机 / 关卡 / 房间 / 排行榜
+node test/progression.mjs  # 24 项:成长 / 转生 / 跑步机 / 关卡 / 房间 / 排行榜
 DATABASE_URL=... node test/multiplayer.mjs   # 14 项:偷宠物
 ```
 
 `progression.mjs` 覆盖:物理常量下发、移动涨 speed、静止不涨、转生门槛、
-跑步机宝石不足、关卡顺序解锁与 speed 门禁、进入关卡传送、掉落复活、
+跑步机宝石不足/宝石足够、关卡顺序解锁与 speed 门禁、进入关卡传送、掉落复活、
 退出关卡、房间列表/切换/非法 id、排行榜内容、**客户端上传 speed 被忽略**、
 断线重连从 PostgreSQL 恢复进度。
 
 手动冒烟:
 
 1. 登录,按 `W` 跑动,左上角 speed 从 0 往上涨
-2. 捡 5 颗宝石 → 点 Treadmills 里的 `Buy`,倒计时出现,speed 涨得更快
+2. 走到跑步机上 → 弹出"需要宝石购买时长",点购买 → 倒计时出现,同位置 speed 涨得更快
 3. 攒到 100 speed → 按 `R`,rebirth +1、倍率变 ×1.5
 4. 点 Stage 1 的 `Enter`,跳到关卡;跳到最高平台踩进发光区 → 提示通关
 5. 中途往侧面掉下去 → 自动回到最近检查点
@@ -529,26 +630,56 @@ sudo systemctl restart speedy
 ### 1. 自动化测试
 
 ```bash
-npm start &                                   # 先起服务
+npm start &                                        # 先起服务
 
-node test/e2e.mjs                              # 26 项
-DATABASE_URL=... node test/multiplayer.mjs     # 14 项（需要直连数据库发宠物）
+node test/e2e.mjs                                  # 26 项
+node test/progression.mjs                          # 24 项
+DATABASE_URL=... node test/multiplayer.mjs         # 14 项(需要直连数据库发宠物)
+node test/rooms.mjs                                # 12 项
+DATABASE_URL=... node test/gems.mjs                # 9 项(需要直连数据库核对宝石)
+DATABASE_URL=... node test/stage-clear.mjs         # 12 项(真的走完 Stage 1)
+node test/stage-geometry.mjs                       # 15 项(关卡可达性,不用起服务)
+node test/treadmill.mjs                            # 22 项(纯逻辑,不用起服务)
+node test/treadmill-e2e.mjs                        # 8 项(真的走到踏板上)
 ```
 
+合计 142 项断言。
+
 `e2e.mjs` 覆盖：注册/登录/会话/票据、伪造 token 被拒、welcome 结构、
-输入驱动的权威位移与限速、快照排除自身、远距离拾取被拒、非法字段被拒、
-瞬移被忽略、超频被断开、健康检查。
+输入驱动的权威位移与限速、快照排除自身、地面不再有可拾取宝石、
+非法字段被拒、瞬移被忽略、超频被断开、健康检查。
+
+`progression.mjs` 覆盖:speed 随移动增长、停下即停、转生门槛、
+跑步机购买(宝石不足 / 宝石足够)、关卡锁与 speed 门槛、存档恢复。
 
 `multiplayer.mjs` 覆盖：野生宠物不可偷、不能偷自己的、不存在的宠物、
 远距离被拒、合法抢夺成功、原主人收到通知、库存同步、冷却保护。
 
+`rooms.mjs` 覆盖:房间创建者记录、非房主不能删、不能删当前所在房间、
+公共大厅不能删、房主删除后所有住户被送回 lobby、房间列表刷新。
+
+`gems.mjs` 覆盖:启动宝石只发一次、地图上没有地面宝石、
+地面拾取请求被拒、客户端上传宝石数被忽略。
+
+`stage-clear.mjs` 覆盖:首通发放宝石并落库、重复通关不再发宝石。
+
+`stage-geometry.mjs` 覆盖:每一关都能真的走到 goal、单层上升不超过跳跃高度、
+平台间隙在跳跃范围内、消失平台开启时长足够落脚。
+**改关卡几何后必须先跑这个,否则可能出现玩家永远过不去的关。**
+
+`treadmill.mjs` / `treadmill-e2e.mjs` 覆盖:站上踏板被识别、没买没有倍率、
+买了倍率等于配置、时长耗尽立刻失效、三台机器互不干扰、宝石不足被拒。
+
 ### 2. 手动冒烟
 
 1. 开两个浏览器窗口，分别注册 `alice` / `bob`
-2. alice 按 `E` 捡几颗宝石，HUD 数字增加
-3. alice 走到 bob 的宠物旁按 `E`，bob 收到"你的宠物被偷走了"
-4. alice 按 `F` 孵化自己的宠物，进度条 +25%
-5. 切到别的标签页 10 秒再切回，连接不断，位置连续
+2. 各自拿到 15 颗启动宝石,HUD 显示正确
+3. alice 进 Stage 1 走到终点,HUD 飘出首次通关宝石数
+4. 再通一次同一关:提示"本关已通关,不再获得宝石奖励"
+5. alice 走到跑步机上:弹出"需要宝石购买时长"
+6. 买下时长后同一位置增速明显变快,HUD 显示倒计时
+7. alice 按 `E` 偷 bob 的宠物,bob 收到"你的宠物被偷走了"
+8. 切到别的标签页 10 秒再切回,连接不断,位置连续
 
 ### 3. 观察日志
 

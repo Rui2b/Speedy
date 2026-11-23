@@ -256,7 +256,9 @@ async function main() {  const suffix = crypto.randomBytes(3).toString('hex');
   // --- 2. Speed 随移动增长 ---
   const speedBefore = a.welcome.self.speed ?? 0;
   await a.move(1500);
-  const afterMove = await a.waitFor((m) => m.type === 'progress', 3000);
+  // 队列里还有移动之前的旧包,所以只认"比开始时更大"的 progress;
+  // 直接取队列里第一条会读到移动开始前的那一帧。
+  const afterMove = await a.waitFor((m) => m.type === 'progress' && m.speed > speedBefore, 4000);
   check(
     '移动时 speed 增长',
     afterMove.speed > speedBefore,
@@ -298,7 +300,8 @@ async function main() {  const suffix = crypto.randomBytes(3).toString('hex');
   );
 
   // --- 5. 跑步机:宝石不足 ---
-  a.send({ type: 'buy_treadmill', treadmillId: 'treadmill-1' });
+  // 注册即送 15 宝石,所以要挑一个肯定买不起的(最高档 40)
+  a.send({ type: 'buy_treadmill', treadmillId: 'treadmill-3' });
   const buyFail = await a.waitFor(
     (m) => m.type === 'action_result' && m.action === 'buy_treadmill',
     3000,
@@ -308,6 +311,14 @@ async function main() {  const suffix = crypto.randomBytes(3).toString('hex');
     buyFail.ok === false && buyFail.reason === 'not_enough_gems',
     `reason=${buyFail.reason} need=${buyFail.need}`,
   );
+
+  // 买得起的应该成功
+  a.send({ type: 'buy_treadmill', treadmillId: 'treadmill-1' });
+  const buyOk = await a.waitFor(
+    (m) => m.type === 'action_result' && m.action === 'buy_treadmill',
+    3000,
+  );
+  check('宝石足够时买跑步机成功', buyOk.ok === true, `reason=${buyOk.reason}`);
 
   // --- 6. 非法跑步机 id ---
   a.send({ type: 'buy_treadmill', treadmillId: 'no-such-thing' });

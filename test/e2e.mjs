@@ -227,11 +227,12 @@ async function main() {
   const clientA = await Client.connect(`${WS_BASE}/ws?token=${encodeURIComponent(tokenA)}`, 'A');
   const clientB = await Client.connect(`${WS_BASE}/ws?token=${encodeURIComponent(tokenB)}`, 'B');
 
-  const welcomeA = await clientA.waitFor((m) => m.type === 'welcome');
+  // 握手要读库;本地通过 SSH 隧道连远程库时每次往返约 200ms,所以要给足时间
+  const welcomeA = await clientA.waitFor((m) => m.type === 'welcome', 20000);
   record('welcome carries the self state', Boolean(welcomeA.self?.pos) && typeof welcomeA.uid === 'string');
   record('welcome carries server config', welcomeA.config?.tickRate === 20 && welcomeA.config?.broadcastRate === 10);
 
-  const welcomeB = await clientB.waitFor((m) => m.type === 'welcome');
+  const welcomeB = await clientB.waitFor((m) => m.type === 'welcome', 20000);
 
   /* ------------------------ 4. 输入 → 权威位移 --------------------- */
   let seq = seqStart();
@@ -271,7 +272,8 @@ async function main() {
     5000,
   );
   record('B receives world_snapshot containing A', true);
-  record('snapshot carries gems', Array.isArray(snapshot.gems) && snapshot.gems.length > 0);
+  // P2 起宝石只来自首通奖励,地图上不再有可拾取的宝石
+  record('snapshot carries no ground gems', Array.isArray(snapshot.gems) && snapshot.gems.length === 0);
   // 宠物位置按更低频率下发,所以要等到一条带 pets 的快照
   const petSnapshot = await clientB.waitFor(
     (m) => m.type === 'world_snapshot' && Array.isArray(m.pets),
@@ -282,25 +284,16 @@ async function main() {
   const snapshotB2 = await clientB.waitFor((m) => m.type === 'world_snapshot', 3000);
   record('snapshot excludes the receiver', !snapshotB2.players.some((p) => p.uid === welcomeB.uid));
 
-  /* ------------------------ 5. 宝石拾取校验 ----------------------- */
+  /* ------------------------ 5. 宝石只来自首通奖励 ------------------- */
+  // P2 起地图上不再生成可拾取的宝石:任何拾取请求都必须被拒绝
   const gems = snapshot.gems;
-  const farGem = gems.find((g) => {
-    const d = Math.hypot(g.pos.x - lastSelf.pos.x, g.pos.z - lastSelf.pos.z);
-    return d > 5;
-  });
-  if (farGem) {
-    clientA.send({ type: 'try_pick_gem', gemId: farGem.gemId });
-    const res = await clientA.waitFor((m) => m.type === 'action_result' && m.action === 'pick_gem', 3000);
-    record('distant pickup is refused', res.ok === false && res.reason === 'too_far', `reason=${res.reason}`);
-  } else {
-    record('distant pickup is refused', false, 'no gem far enough away');
-  }
+  record('map has no pickable gems', Array.isArray(gems) && gems.length === 0, `count=${gems?.length}`);
 
   clientA.send({ type: 'try_pick_gem', gemId: 'does-not-exist' });
   const invalidGem = await clientA.waitFor((m) => m.type === 'action_result' && m.action === 'pick_gem', 3000);
   record(
     'unknown gem is refused',
-    invalidGem.ok === false && invalidGem.reason === 'gem_unavailable',
+    invalidGem.ok === false && invalidGem.reason === 'gems_are_rewards_only',
     `reason=${invalidGem.reason}`,
   );
 

@@ -9,6 +9,9 @@
 import { ROOMS } from './gameConfig.js';
 import { World } from './world.js';
 
+/** 房间被删除时通知房内玩家的消息类型 */
+const SERVER_EVENT_ROOM_CLOSED = 'room_closed';
+
 /** 生成一个可读的房间 id,冲突则追加重试。 */
 function generateRoomId(existing) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -25,8 +28,9 @@ export class Room {
    * @param {object} deps
    * @param {import('./store.js').PgStore} deps.store
    * @param {Array<object>} deps.stages 关卡运行时数据
+   * @param {string} [deps.createdByUid] 创建者 uid;公共大厅为 null
    */
-  constructor(id, { store, stages }) {
+  constructor(id, { store, stages, createdByUid = null }) {
     this.id = id;
     this.store = store;
     this.stages = stages;
@@ -35,6 +39,11 @@ export class Room {
     this.sessions = new Map();
     this.createdAt = Date.now();
     this.lastActiveAt = Date.now();
+    /** 创建者 uid。公共大厅永久存在,两者都是 null */
+    this.createdByUid = createdByUid;
+    this.createdByName = '';
+    /** 公共大厅不可删除 */
+    this.isPublic = id === ROOMS.defaultId;
     this.rosterDirty = true;
     /** 本房间的排行榜缓存 */
     this.leaderboard = [];
@@ -102,13 +111,67 @@ export class RoomManager {
 
   ensureDefaultRoom() {
     if (this.rooms.has(ROOMS.defaultId)) return this.rooms.get(ROOMS.defaultId);
-    return this.createRoom(ROOMS.defaultId);
+    return this.createRoom(ROOMS.defaultId, null);
   }
 
-  createRoom(id) {
-    const room = new Room(id, { store: this.store, stages: this.stages });
+  /**
+   * 创建房间。
+   * @param {string} id
+   * @param {object|null} creator 创建者 session;null 表示系统创建的公共大厅
+   */
+  createRoom(id, creator = null) {
+    const room = new Room(id, {
+      store: this.store,
+      stages: this.stages,
+      createdByUid: creator?.uid ?? null,
+    });
+    if (creator) room.createdByName = creator.player?.displayName ?? creator.displayName ?? '';
     this.rooms.set(id, room);
     return room;
+  }
+
+  /**
+   * 删除房间。只有创建者能删,公共大厅永远不能删,
+   * 且不能删自己当前所在的房间。
+   *
+   * @param {string} roomId
+   * @param {object} session 发起删除的会话
+   * @returns {{ok: true, movedTo: string} | {ok: false, reason: string}}
+   */
+  deleteRoom(roomId, session) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { ok: false, reason: 'room_not_found' };
+
+    // 公共大厅永久存在
+    if (room.isPublic) return { ok: false, reason: 'cannot_delete_public' };
+
+    // 只有创建者能删
+    if (room.createdByUid !== session.uid) return { ok: false, reason: 'not_owner' };
+
+    // 不能删自己正在里面的房间
+    if (session.roomId === roomId) return { ok: false, reason: 'cannot_delete_current' };
+
+    // 把房间里其他所有人送回公共大厅
+    const lobby = this.ensureDefaultRoom();
+    for (const other of [...room.sessions.values()]) {
+      room.sessions.delete(other.uid);
+      other.roomId = lobby.id;
+      lobby.sessions.set(other.uid, other);
+      if (other.player) {
+        room.world.removePlayer(other.uid);
+        lobby.world.addPlayer(other.player);
+        lobby.world.exitStage(other.player, Date.now());
+      }
+      other.send(SERVER_EVENT_ROOM_CLOSED, {
+        roomId,
+        movedTo: lobby.id,
+        reason: 'room_deleted',
+      });
+      lobby.rosterDirty = true;
+    }
+
+    this.rooms.delete(roomId);
+    return { ok: true, movedTo: lobby.id };
   }
 
   getRoom(id) {
@@ -117,9 +180,11 @@ export class RoomManager {
 
   /**
    * 获取或按需创建房间。
-   * @returns {{room: Room|null, reason?: string}}
+   * @param {string} id
+   * @param {object|null} [creator] 首次创建该房间的会话
+   * @returns {{room: Room|null, reason?: string, created?: boolean}}
    */
-  joinRoom(id) {
+  joinRoom(id, creator = null) {
     const requested = typeof id === 'string' ? id.trim().toLowerCase() : '';
     if (requested && !ROOMS.idPattern.test(requested)) {
       return { room: null, reason: 'invalid_room_id' };
@@ -130,7 +195,7 @@ export class RoomManager {
     const existing = this.rooms.get(targetId);
     if (existing) {
       if (existing.isFull) return { room: null, reason: 'room_full' };
-      return { room: existing };
+      return { room: existing, created: false };
     }
 
     // 新建房间前先检查上限
@@ -141,7 +206,8 @@ export class RoomManager {
       }
     }
 
-    return { room: this.createRoom(targetId) };
+    // 房间不存在则创建,并记录创建者
+    return { room: this.createRoom(targetId, creator), created: true };
   }
 
   /** 往房间里加一个会话。 */
@@ -184,6 +250,9 @@ export class RoomManager {
       id: room.id,
       players: room.playerCount,
       capacity: ROOMS.maxPlayersPerRoom,
+      creator: room.createdByName || (room.isPublic ? '' : 'Unknown'),
+      createdByUid: room.createdByUid,
+      isPublic: room.isPublic,
     }));
   }
 

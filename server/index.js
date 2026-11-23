@@ -424,7 +424,7 @@ async function main() {
 }
 
 let shuttingDown = false;
-async function shutdown(signal) {
+async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log.info(`收到 ${signal},正在关闭...`);
@@ -445,7 +445,7 @@ async function shutdown(signal) {
   } finally {
     clearTimeout(forceExit);
     closeLogger();
-    process.exit(0);
+    process.exit(exitCode);
   }
 }
 
@@ -456,7 +456,9 @@ process.on('unhandledRejection', (err) => {
 });
 process.on('uncaughtException', (err) => {
   log.error('未捕获异常', { message: err?.message, stack: err?.stack });
-  shutdown('uncaughtException');
+  // 退出码必须是非 0:systemd 才会把它当成失败并重启。
+  // 否则"端口被占"这类致命错误会以 0 退出,看起来像正常停止。
+  shutdown('uncaughtException', 1);
 });
 
 main().catch((err) => {

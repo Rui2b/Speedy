@@ -39,11 +39,13 @@ export class TurnstileGate {
    * @param {HTMLElement} options.note 出错提示
    * @param {(message: string) => void} options.onError
    */
-  constructor({ slot, container, note, onError }) {
+  constructor({ slot, container, note, onError, onReady }) {
     this.slot = slot;
     this.container = container;
     this.note = note;
     this.onError = onError;
+    /** token 到手时回调,用来启用提交按钮 */
+    this.onReady = onReady;
 
     /** null 表示还没解析出来;false 表示服务端未启用 */
     this.enabled = null;
@@ -91,6 +93,7 @@ export class TurnstileGate {
         callback: (token) => {
           if (generation !== this.generation) return;
           this.token = token;
+        this.onReady?.(token);
         },
         'error-callback': () => {
           if (generation !== this.generation) return;
@@ -103,7 +106,9 @@ export class TurnstileGate {
         },
       });
       return true;
-    } catch {
+    } catch (err) {
+      // 真实原因必须写进 console,否则线上只能看到一句"不可用",没法排查
+      console.error('[turnstile] render failed', err);
       this.fail('Verification is unavailable. Reload the page, or check your connection.');
       return false;
     }
@@ -122,6 +127,43 @@ export class TurnstileGate {
   takeToken() {
     if (this.enabled === false) return '';
     return this.token ?? null;
+  }
+
+  /**
+   * 等 token 到手。
+   *
+   * Turnstile 的挑战是异步的:widget 挂上之后要过一会儿才回调。
+   * 客户端在拿到 token 之前必须保持提交按钮禁用,否则用户会点到一个
+   * 注定失败的按钮,只能看到一句"还没验证完"。
+   *
+   * @param {number} timeoutMs
+   * @returns {Promise<string|null>} token;未启用返回空串;超时返回 null
+   */
+  waitForToken(timeoutMs = 20000) {
+    if (this.enabled === false) return Promise.resolve('');
+    if (this.token) return Promise.resolve(this.token);
+
+    // enabled 还是 null(init 尚未跑完)时不能立刻返回 null:
+    // 调用方会把"没有 token"当成"验证结束",于是按钮在挑战还没开始就被启用。
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (this.token) {
+          clearInterval(timer);
+          resolve(this.token);
+          return;
+        }
+        if (this.enabled === false) {
+          clearInterval(timer);
+          resolve('');
+          return;
+        }
+        if (Date.now() - started > timeoutMs) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, 100);
+    });
   }
 
   /**
@@ -169,6 +211,7 @@ export class TurnstileGate {
       callback: (token) => {
         if (generation !== this.generation) return;
         this.token = token;
+          this.onReady?.(token);
       },
       'error-callback': () => {
         if (generation !== this.generation) return;

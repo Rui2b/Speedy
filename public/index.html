@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
-  <meta name="description" content="A browser 3D playground. Run the field, collect gems, hatch pets, steal one from another player." />
+  <meta name="description" content="A browser 3D playground. Run the field, clear stages for gems, and hatch pets. The server owns every position." />
   <title>Speedy</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preload" href="/vendor/fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin />
@@ -53,6 +53,12 @@
           <dd id="hud-fps">&mdash;</dd>
         </div>
       </dl>
+
+      <!-- 当前账号 + 退出登录 -->
+      <div class="account">
+        <span class="account-name" id="hud-user">—</span>
+        <button type="button" class="account-logout" id="btn-logout">Log out</button>
+      </div>
     </header>
 
     <!-- 左侧:房间 / 关卡 / 跑步机 / 重生 -->
@@ -107,15 +113,40 @@
     <!-- 房间选择 -->
     <div id="room-panel" class="room-panel" hidden>
       <div class="bag-head">
-        <h2 class="panel-title">Choose a room</h2>
+        <h2 class="panel-title">Rooms</h2>
         <button type="button" class="mini-btn" id="btn-room-close">Close</button>
       </div>
+      <p class="room-hint">
+        Type a room name. If it does not exist yet, it is created for you.
+        Share the name so others can join.
+      </p>
       <div id="room-list" class="room-list"></div>
       <div class="room-create">
         <input id="room-input" type="text" maxlength="24" placeholder="room name"
                pattern="[a-z0-9-]{1,24}" aria-label="Room name" />
         <button type="button" class="mini-btn" id="btn-room-join">Join</button>
       </div>
+    </div>
+
+    <!-- 通用确认弹窗(删除房间、退出等破坏性操作) -->
+    <div id="confirm-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <h2 class="modal-title" id="confirm-title">Are you sure?</h2>
+        <p class="modal-body" id="confirm-body"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+          <button type="button" class="btn btn-danger" id="confirm-ok">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- On-treadmill prompt: standing without a pass does nothing -->
+    <div id="treadmill-prompt" class="treadmill-prompt" role="status" hidden>
+      <div class="treadmill-prompt-copy">
+        <strong id="treadmill-prompt-title"></strong>
+        <p id="treadmill-prompt-body"></p>
+      </div>
+      <button type="button" class="btn btn-primary" id="treadmill-prompt-buy" hidden></button>
     </div>
 
     <!-- Pets owned by this player -->
@@ -129,7 +160,7 @@
     <div id="controls-hint" class="controls" hidden>
       <span class="control"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</span>
       <span class="control"><kbd>Space</kbd> Jump</span>
-      <span class="control"><kbd>E</kbd> Collect / steal / hatch</span>
+      <span class="control"><kbd>E</kbd> Steal pet / hatch egg</span>
       <span class="control"><kbd>R</kbd> Rebirth</span>
       <span class="control"><kbd>B</kbd> Pets</span>
     </div>
@@ -143,7 +174,7 @@
         </div>
 
         <p class="entry-lede">
-          Run the field, collect gems, hatch a pet, and take one from another player.
+          Run the field, clear stages for gems, hatch a pet, and take one from another player.
           The server computes every position.
         </p>
 

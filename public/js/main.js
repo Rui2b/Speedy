@@ -28,12 +28,15 @@ const el = {
   turnstileSlot: document.getElementById('turnstile-slot'),
   turnstileWidget: document.getElementById('turnstile-widget'),
   turnstileNote: document.getElementById('turnstile-note'),
+  btnLogout: document.getElementById('btn-logout'),
+  hudUser: document.getElementById('hud-user'),
 };
 
 const state = {
   /** 短期 WS 票据,只放内存,不落 localStorage(避免 XSS 偷取) */
   wsToken: null,
   uid: null,
+  userName: '',
   gems: 0,
   pets: [],
   /** gemId -> {x,z} */
@@ -59,13 +62,21 @@ const gameUi = new GameUi({
   onExitStage: () => net.send({ type: 'exit_stage' }),
   onRebirth: () => net.send({ type: 'request_rebirth' }),
   onJoinRoom: (roomId) => net.send({ type: 'join_room', roomId }),
+  onDeleteRoom: (roomId) => net.send({ type: 'delete_room', roomId }),
 });
 
 const gate = new TurnstileGate({
   slot: el.turnstileSlot,
   container: el.turnstileWidget,
   note: el.turnstileNote,
-  onError: (message) => authError(message),
+  onError: (message) => {
+    authError(message);
+    // 挑战失败时,挂起的那次提交也要收尾,不能让用户一直等
+    clearPendingAuth();
+    setBusy(false);
+  },
+  // token 一到,如果用户已经点过按钮,立刻继续提交
+  onReady: () => resumePendingAuth(),
 });
 
 const net = new NetClient({
@@ -74,6 +85,9 @@ const net = new NetClient({
   getToken: () => state.wsToken,
   onJumpSent: () => input.consumeJump(),
 });
+
+/** 验证兜底定时器句柄 */
+let pendingAuthTimer = null;
 
 /* ------------------------------------------------------------------------- *
  * 启动
@@ -110,6 +124,16 @@ async function boot() {
 function showLogin() {
   el.overlay.hidden = false;
   el.loading.hidden = true;
+  el.error.hidden = true;
+  el.error.textContent = '';
+
+  // 退出登录后 Turnstile 的 token 已经用过,必须重新拿一个新的挑战
+  if (gate.enabled) {
+    gate.reset(true);
+  }
+  clearPendingAuth();
+  setBusy(false);
+
   el.username.focus();
 }
 
@@ -149,7 +173,8 @@ async function submitAuth(mode) {
   // 必须先拿到 Turnstile token 才能提交;服务端未启用时 takeToken() 返回空串
   const turnstileToken = gate.takeToken();
   if (turnstileToken === null) {
-    authError('Finish the verification below first');
+    // 挑战还在进行:记下这次提交意图,拿到 token 后自动继续
+    submitWhenVerified(mode);
     return;
   }
 
@@ -205,6 +230,47 @@ function setBusy(busy, mode) {
   el.btnRegister.textContent = busy && mode === 'register' ? 'Creating account' : 'Create account';
 }
 
+/**
+ * 提交前的验证等待。
+ *
+ * 早期做法是"没 token 就把按钮禁用",但一旦挑战被拦截或超时,
+ * 用户面对的就是一个永远点不动的按钮,比报错还难受。
+ *
+ * 现在改成:点了就记下意图,提示正在验证,token 一到立刻自动提交。
+ */
+
+/** 等 token 到手后要自动执行的那次提交 */
+let pendingAuth = null;
+
+function submitWhenVerified(mode) {
+  pendingAuth = mode;
+  setBusy(true, mode);
+  authError('Finishing the browser check. This takes a moment');
+
+  clearTimeout(pendingAuthTimer);
+  pendingAuthTimer = setTimeout(() => {
+    if (!pendingAuth) return;
+    pendingAuth = null;
+    setBusy(false);
+    authError('The browser check did not finish. Reload the page and try again');
+  }, 30000);
+}
+
+function clearPendingAuth() {
+  pendingAuth = null;
+  clearTimeout(pendingAuthTimer);
+}
+
+/** Turnstile 拿到 token 时调用:如果有挂起的提交,立刻继续 */
+function resumePendingAuth() {
+  if (!pendingAuth) return;
+  const mode = pendingAuth;
+  clearPendingAuth();
+  el.error.hidden = true;
+  setBusy(false);
+  submitAuth(mode);
+}
+
 el.form.addEventListener('submit', (event) => {
   event.preventDefault();
   submitAuth('login');
@@ -241,17 +307,87 @@ function setLoading(show, text) {
 }
 
 /* ------------------------------------------------------------------------- *
+ * 退出登录 / 会话失效
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 退出登录。
+ *
+ * 顺序很重要:先主动关掉 WebSocket,再清 cookie,最后回到登录页。
+ * 如果先清 cookie,断线重连会拿不到票据而反复报错。
+ */
+async function doLogout(reason) {
+  if (state.loggingOut) return;
+  state.loggingOut = true;
+
+  try {
+    net.disconnect();
+  } catch {
+    /* 已经断开 */
+  }
+
+  // 清掉服务端 cookie,清掉内存里的票据
+  try {
+    await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+  } catch {
+    /* 网络异常也要能退出 */
+  }
+  state.wsToken = null;
+  state.uid = null;
+  state.userName = '';
+  state.starting = false;
+
+  // 清 UI 状态
+  input.setEnabled(false);
+  hud.hideGameUi();
+  gameUi.hide();
+  view.logoutReset?.();
+
+  state.loggingOut = false;
+
+  showLogin();
+
+  // 提示要放在 showLogin 之后,否则会被它清掉
+  if (reason === 'expired') {
+    authError('Your session expired. Sign in again.');
+  } else if (reason === 'kicked') {
+    authError('This account signed in somewhere else. You are signed out.');
+  }
+}
+
+/**
+ * 服务端明确拒绝会话时调用:断开并引导重新登录。
+ * 只在真的需要时弹,避免网络抖动把人踢出去。
+ */
+function handleSessionLost(reason) {
+  if (state.loggingOut) return;
+  hud.setConnectionBanner('');
+  doLogout(reason);
+}
+
+el.btnLogout?.addEventListener('click', () => {
+  // 退出是破坏性操作,先确认
+  if (window.confirm('Log out and return to the sign in screen?')) {
+    doLogout();
+  }
+});
+
+/* ------------------------------------------------------------------------- *
  * 服务器消息
  * ------------------------------------------------------------------------- */
 function handleServerMessage(msg) {
   switch (msg.type) {
     case 'welcome': {
       state.uid = msg.uid;
+      state.userName = msg.displayName ?? msg.uid;
       state.gems = msg.self?.gems ?? 0;
       state.pets = msg.self?.pets ?? [];
       state.lastSelfPos = msg.self?.pos ?? { x: 0, y: 0, z: 0 };
       state.roster.clear();
       for (const entry of msg.roster ?? []) state.roster.set(entry.uid, entry);
+
+      // 右上角显示当前账号
+      if (el.hudUser) el.hudUser.textContent = state.userName;
 
       // 用服务器下发的物理常量建本地预测器,保证两边参数同源
       if (msg.physics) {
@@ -279,6 +415,9 @@ function handleServerMessage(msg) {
       state.speed = msg.speed;
       gameUi.applyProgress(msg);
       hud.setOnline(state.online);
+      // 踏板高亮跟着"我买了哪台"走,同时驱动站上去未购买时的提示
+      view.treadmillActiveUntil = msg.treadmills ?? {};
+      gameUi.applyTreadmillAt(msg.treadmillAt ?? null);
       break;
 
     case 'leaderboard':
@@ -287,6 +426,15 @@ function handleServerMessage(msg) {
 
     case 'rooms':
       gameUi.applyRooms(msg.rooms);
+      break;
+
+    case 'room_closed':
+      // 房主删除了房间,我们在里面的所有人都被送回公共大厅
+      gameUi.applyRoomClosed(msg);
+      hud.toast('The room was closed. You are back in the lobby.', '');
+      if (predictor && state.lastSelfPos) predictor.snapTo(state.lastSelfPos);
+      state.pendingRoomRefresh = true;
+      net.send({ type: 'request_rooms' });
       break;
 
     case 'stage_state':
@@ -410,14 +558,58 @@ const ACTION_TEXT = {
       server_full: 'No room slots left',
     },
   },
-  stage_clear: { ok: 'Stage cleared', fail: {} },
+  delete_room: {
+    ok: 'Room deleted',
+    fail: {
+      room_not_found: 'That room no longer exists',
+      cannot_delete_public: 'The public lobby cannot be deleted',
+      not_owner: 'Only the room creator can delete it',
+      cannot_delete_current: 'Leave the room before deleting it',
+    },
+  },
+  stage_clear: { ok: '', fail: {} },
 };
+
+/**
+ * 通关结算。
+ *
+ * 宝石只来自首通奖励(P2):
+ *   - 首次通关:阶段奖励 + 可能的里程碑奖励
+ *   - 重复通关:不再发宝石,但仍可继续攒 speed
+ */
+function handleStageClear(msg) {
+  if (!msg.firstTime) {
+    hud.toast('Stage cleared again. No more gems from this stage, but speed still counts.', 'info');
+    return;
+  }
+
+  const parts = [];
+  if (msg.stageGems > 0) parts.push(`${msg.stageGems} gems`);
+  if (msg.milestoneGems > 0) parts.push(`${msg.milestoneGems} milestone gems`);
+
+  const gems = msg.totalGems > 0 ? `+${msg.totalGems} gems` : 'no gems';
+  const detail = parts.length > 1 ? ` (${parts.join(' + ')})` : '';
+
+  hud.toast(`First clear. ${gems}${detail}`, 'good');
+
+  if (msg.totalGems > 0) {
+    gameUi.floatReward(`${msg.totalGems}`, `${msg.stageGems} stage${msg.milestoneGems > 0 ? ` + ${msg.milestoneGems} milestone` : ''}`);
+  }
+
+  for (const group of msg.newMilestones ?? []) {
+    hud.toast(`Milestone ${group}: every 10 new stages reached`, 'good');
+  }
+
+  if (typeof msg.elapsedMs === 'number' && msg.elapsedMs > 0) {
+    hud.toast(`Clear time ${(msg.elapsedMs / 1000).toFixed(2)}s`, 'info');
+  }
+}
 
 function handleActionResult(msg) {
   const table = ACTION_TEXT[msg.action];
 
   if (msg.action === 'stage_clear') {
-    hud.toast(msg.firstTime ? 'Stage cleared' : 'Stage replayed', 'good');
+    handleStageClear(msg);
     return;
   }
   if (msg.action === 'join_room' && msg.ok) {
@@ -475,8 +667,11 @@ function handleConnectionState(nextState, info) {
         hud.toast('Connection lost. Reload the page', 'bad');
         input.setEnabled(false);
       } else if (String(info?.reason ?? '').startsWith('server_')) {
-        hud.toast('The server closed the connection. Sign in again', 'bad');
-        input.setEnabled(false);
+        // 4001 = token 失效或被顶号,4003/4004 = 被判定异常
+        // 这些都不该重连,直接引导回登录页
+        const code = String(info.reason).replace('server_', '');
+        if (code === '4001') handleSessionLost('expired');
+        else handleSessionLost('kicked');
       }
       break;
     default:

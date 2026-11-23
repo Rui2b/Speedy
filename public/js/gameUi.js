@@ -19,6 +19,7 @@ export class GameUi {
    * @param {() => void} handlers.onExitStage
    * @param {() => void} handlers.onRebirth
    * @param {(roomId: string) => void} handlers.onJoinRoom
+   * @param {(roomId: string) => void} handlers.onDeleteRoom
    */
   constructor(handlers) {
     this.handlers = handlers;
@@ -35,6 +36,10 @@ export class GameUi {
       sidePanel: document.getElementById('side-panel'),
       currentRoom: document.getElementById('current-room'),
       treadmillList: document.getElementById('treadmill-list'),
+      treadmillPrompt: document.getElementById('treadmill-prompt'),
+      treadmillPromptTitle: document.getElementById('treadmill-prompt-title'),
+      treadmillPromptBody: document.getElementById('treadmill-prompt-body'),
+      treadmillPromptBuy: document.getElementById('treadmill-prompt-buy'),
       stageList: document.getElementById('stage-list'),
       btnExitStage: document.getElementById('btn-exit-stage'),
       btnRebirth: document.getElementById('btn-rebirth'),
@@ -69,6 +74,9 @@ export class GameUi {
     this.selfUid = '';
     this.lastSpeed = 0;
     this.gainTimer = null;
+    /** 一次购买的有效时长,由 welcome.config 下发 */
+    this.sessionMs = 10 * 60 * 1000;
+    this.lastTreadmillSignature = '';
 
     this.wireEvents();
   }
@@ -95,15 +103,43 @@ export class GameUi {
     this.currentRoom = msg.roomId ?? '';
     this.stages = msg.stages ?? [];
     this.treadmills = msg.config?.treadmills ?? [];
+    if (Number.isFinite(msg.config?.treadmillSessionMs)) {
+      this.sessionMs = msg.config.treadmillSessionMs;
+    }
     this.el.currentRoom.textContent = this.currentRoom;
     this.renderTreadmills();
     this.renderStages();
+  }
+
+  /** 被房主删房后,服务端把我们送回 lobby。 */
+  applyRoomClosed(msg) {
+    this.setCurrentRoom(msg.movedTo ?? 'lobby-1');
+    if (!this.el.roomPanel.hidden) this.renderRooms();
   }
 
   show() {
     this.el.sidePanel.hidden = false;
     this.el.leaderboard.hidden = false;
     this.el.bagBtn.hidden = false;
+  }
+
+  /** 退出登录时收起所有面板。 */
+  hide() {
+    this.el.sidePanel.hidden = true;
+    this.el.leaderboard.hidden = true;
+    this.el.bagBtn.hidden = true;
+    this.el.bagPanel.hidden = true;
+    this.el.roomPanel.hidden = true;
+    this.el.leaderboardRows.replaceChildren();
+    this.el.bagList.replaceChildren();
+    this.el.roomList.replaceChildren();
+    this.el.stageList.replaceChildren();
+    this.el.treadmillList.replaceChildren();
+    this.hideTreadmillPrompt();
+    this.lastTreadmillSignature = '';
+    this.progress = null;
+    this.pets = [];
+    this.lastSpeed = 0;
   }
 
   /* ------------------------------------------------------------------ *
@@ -151,9 +187,79 @@ export class GameUi {
     this.el.online.textContent = String(count);
   }
 
+  /**
+   * 奖励浮层:首次通关时在宝石计数旁浮出 "+N"。
+   * 只做视觉反馈,数值本身以服务端下发为准。
+   */
+  floatReward(amount, detail = '') {
+    const host = this.el.gems?.parentElement ?? this.el.gems;
+    if (!host) return;
+
+    const node = document.createElement('span');
+    node.className = 'reward-float';
+    node.innerHTML = `<strong>+${amount}</strong>${detail ? `<em>${detail}</em>` : ''}`;
+    host.appendChild(node);
+
+    requestAnimationFrame(() => node.classList.add('is-in'));
+    setTimeout(() => {
+      node.classList.add('is-out');
+      setTimeout(() => node.remove(), 400);
+    }, 1600);
+  }
+
   /* ------------------------------------------------------------------ *
    * 跑步机
    * ------------------------------------------------------------------ */
+  /**
+   * 站在跑步机上时的提示。
+   *
+   * 服务端权威:没买时长的玩家可以站上去,但拿不到加成。
+   * 这里只做提示,不参与任何判定。
+   */
+  applyTreadmillAt(context) {
+    const signature = context ? `${context.id}:${context.active}` : '';
+    if (signature === this.lastTreadmillSignature) return;
+    this.lastTreadmillSignature = signature;
+
+    if (!context) {
+      this.hideTreadmillPrompt();
+      return;
+    }
+    if (context.active) {
+      this.showTreadmillPrompt(
+        `${context.name} active`,
+        `${formatRemaining(Math.max(0, context.untilMs - Date.now()))} of ${context.bonus}\u00d7 speed left`,
+        null,
+      );
+      return;
+    }
+    this.showTreadmillPrompt(
+      `${context.name} is locked`,
+      `Spend ${context.gemPrice} gems for ${formatMinutes(this.sessionMs)} of ${context.bonus}\u00d7 speed. Standing here does nothing until you buy it.`,
+      { label: `Buy ${context.gemPrice} gems`, onClick: () => this.handlers.onBuyTreadmill(context.id) },
+    );
+  }
+
+  showTreadmillPrompt(title, body, action) {
+    if (!this.el.treadmillPrompt) return;
+    this.el.treadmillPrompt.hidden = false;
+    this.el.treadmillPromptTitle.textContent = title;
+    this.el.treadmillPromptBody.textContent = body;
+
+    const btn = this.el.treadmillPromptBuy;
+    if (!action) {
+      btn.hidden = true;
+      return;
+    }
+    btn.hidden = false;
+    btn.textContent = action.label;
+    btn.onclick = action.onClick;
+  }
+
+  hideTreadmillPrompt() {
+    if (this.el.treadmillPrompt) this.el.treadmillPrompt.hidden = true;
+  }
+
   renderTreadmills() {
     if (!this.el.treadmillList || this.treadmills.length === 0) return;
 
@@ -181,8 +287,8 @@ export class GameUi {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'mini-btn';
-      btn.textContent = isActive ? '+10m' : 'Buy';
-      btn.title = `Costs ${machine.gemPrice} gems for 10 minutes`;
+      btn.textContent = isActive ? `+${formatMinutes(this.sessionMs)}` : 'Buy';
+      btn.title = `Costs ${machine.gemPrice} gems for ${formatMinutes(this.sessionMs)}`;
       btn.addEventListener('click', () => this.handlers.onBuyTreadmill(machine.id));
 
       row.append(name, meta, btn);
@@ -333,7 +439,12 @@ export class GameUi {
    * ------------------------------------------------------------------ */
   applyRooms(rooms) {
     this.rooms = Array.isArray(rooms) ? rooms : [];
-    if (!this.el.roomPanel.hidden) this.renderRooms();
+    this.renderRooms();
+    // 如果当前房间被删了(房主删房),服务端会推 room_closed,
+    // 但房间列表也可能先到,这里兜底同步一次。
+    if (this.currentRoom && !this.rooms.some((r) => r.id === this.currentRoom)) {
+      // 列表里已经没有自己所在的房间,等 room_closed 处理
+    }
   }
 
   toggleRoomPanel(force) {
@@ -356,17 +467,99 @@ export class GameUi {
       name.className = 'room-row-name';
       name.textContent = room.id;
 
+      const owner = document.createElement('span');
+      owner.className = 'room-row-owner';
+      owner.textContent = room.isPublic ? 'public' : room.creator || '—';
+
       const count = document.createElement('span');
       count.className = 'room-row-count';
       count.textContent = `${room.players}/${room.capacity}`;
 
-      row.append(name, count);
+      row.append(name, owner, count);
+
+      // 只有自己创建、非公共、非当前房间才显示删除按钮。
+      // 这只是 UI 拦截,真正的权限校验在服务端。
+      const canDelete =
+        !room.isPublic &&
+        room.createdByUid &&
+        room.createdByUid === this.selfUid &&
+        room.id !== this.currentRoom;
+
+      if (canDelete) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'room-del';
+        del.textContent = 'Delete';
+        del.addEventListener('click', (event) => {
+          event.stopPropagation();
+          this.confirm(
+            'Delete this room?',
+            `Room "${room.id}" will close and everyone inside will be sent to the public lobby.`,
+            () => this.handlers.onDeleteRoom(room.id),
+          );
+        });
+        row.appendChild(del);
+      }
+
       row.addEventListener('click', () => {
         this.handlers.onJoinRoom(room.id);
         this.toggleRoomPanel(false);
       });
       this.el.roomList.appendChild(row);
     }
+
+    if (this.rooms.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'panel-value';
+      empty.textContent = 'No rooms';
+      this.el.roomList.appendChild(empty);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 通用确认弹窗
+   * ------------------------------------------------------------------ */
+
+  /**
+   * @param {string} title
+   * @param {string} body
+   * @param {() => void} onConfirm
+   */
+  confirm(title, body, onConfirm) {
+    const backdrop = document.getElementById('confirm-modal');
+    const titleEl = document.getElementById('confirm-title');
+    const bodyEl = document.getElementById('confirm-body');
+    const okBtn = document.getElementById('confirm-ok');
+    const cancelBtn = document.getElementById('confirm-cancel');
+
+    titleEl.textContent = title;
+    bodyEl.textContent = body;
+    backdrop.hidden = false;
+    okBtn.focus();
+
+    const cleanup = () => {
+      backdrop.hidden = true;
+      okBtn.removeEventListener('click', handleOk);
+      cancelBtn.removeEventListener('click', handleCancel);
+      backdrop.removeEventListener('click', handleBackdrop);
+      document.removeEventListener('keydown', handleKey);
+    };
+    const handleOk = () => {
+      cleanup();
+      onConfirm();
+    };
+    const handleCancel = () => cleanup();
+    const handleBackdrop = (event) => {
+      if (event.target === backdrop) cleanup();
+    };
+    const handleKey = (event) => {
+      if (event.key === 'Escape') cleanup();
+    };
+
+    okBtn.addEventListener('click', handleOk);
+    cancelBtn.addEventListener('click', handleCancel);
+    backdrop.addEventListener('click', handleBackdrop);
+    document.addEventListener('keydown', handleKey);
   }
 
   joinTypedRoom() {
@@ -403,4 +596,11 @@ function formatRemaining(ms) {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/** 时长文案:整分钟就写 "10 minutes",否则保留一位小数 */
+function formatMinutes(ms) {
+  const minutes = ms / 60000;
+  if (Number.isInteger(minutes)) return `${minutes} minutes`;
+  return `${minutes.toFixed(1)} minutes`;
 }

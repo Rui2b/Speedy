@@ -72,10 +72,14 @@ export function activePlatforms(stage, nowMs) {
 /**
  * 计算玩家应该站的高度。
  *
+ * @param {object} stage
+ * @param {{x:number,y:number,z:number}} point
+ * @param {number} nowMs
+ * @param {Array<object>} [boxes] 覆盖用的平台列表(测试里把消失平台当常亮)
  * @returns {number|null} 支撑面顶面高度,没有支撑返回 null
  */
-export function groundHeightAt(stage, point, nowMs) {
-  return supportHeightUnder(point, activePlatforms(stage, nowMs));
+export function groundHeightAt(stage, point, nowMs, boxes = null) {
+  return supportHeightUnder(point, boxes ?? activePlatforms(stage, nowMs));
 }
 
 /** 玩家是否掉出关卡。 */

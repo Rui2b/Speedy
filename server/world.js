@@ -17,7 +17,7 @@ import {
 } from './config.js';
 import { createEgg, hatchDurationMs, tickHatch, updateFollow, startHatch } from './pets.js';
 import { gainSpeed } from './speedSystem.js';
-import { SPEED } from './gameConfig.js';
+import { SPEED, TREADMILL } from './gameConfig.js';
 import {
   activePlatforms,
   groundHeightAt,
@@ -39,6 +39,29 @@ function randomInDisc(radius) {
 
 /** 复用的空输入常量,避免每 tick 分配对象 */
 const IDLE_INPUT = Object.freeze({ moveX: 0, moveZ: 0, jump: false });
+
+/**
+ * 关卡里脚下没有平台时的"支撑面"。
+ * 用一个永远低于死亡线的值,让玩家继续下落到 isFallen 触发复活;
+ * 如果回退到 lobby 的 groundY,关卡会出现一块看不见的地面,掉落判定永远不生效。
+ */
+const NO_GROUND = -Infinity;
+
+/**
+ * lobby 里跑步机踏板是实体:玩家会真的站在踏板上,而不是踩在地面里。
+ * 返回踏板顶面高度,不在踏板上就返回 null(用默认地面)。
+ *
+ * @param {{x:number,y:number,z:number}} point 玩家脚底坐标
+ * @returns {number|null}
+ */
+function treadmillSupportHeight(point) {
+  for (const machine of TREADMILL.list) {
+    if (point.x < machine.min.x || point.x > machine.max.x) continue;
+    if (point.z < machine.min.z || point.z > machine.max.z) continue;
+    if (point.y >= machine.max.y - 0.6) return machine.max.y;
+  }
+  return null;
+}
 
 export function clampToWorld(x, z) {
   const radius = Math.hypot(x, z);
@@ -76,6 +99,8 @@ export function createPlayerState({ uid, displayName, skinId, gems, save }) {
     treadmillUntil: new Map(),
     /** 已通关的 stage id 集合 */
     clearedStages: new Set(restored.clearedStages ?? []),
+    /** 本轮进入关卡后是否已经触发过通关,防止一次踩 goal 反复回调 */
+    clearedThisRun: false,
     /** 当前所在:lobby 或某关 */
     location: restored.location ?? { world: 'lobby', stage: 0 },
     /** 最近检查点(掉落后复活用) */
@@ -114,6 +139,7 @@ export function createPlayerState({ uid, displayName, skinId, gems, save }) {
  *
  * `groundHeight` 是玩家脚下当前的支撑面高度(Obby 平台顶面),传 null 表示
  * 用默认地面。Lobby 没有平台,传 null 即可。客户端预测用同一套函数,保证手感一致。
+ * 关卡里脚下没有平台时应传 NO_GROUND,让玩家真的往下掉。
  *
  * @param {object} player
  * @param {object} input
@@ -251,26 +277,24 @@ export class World {
   constructor() {
     /** @type {Map<string, object>} uid -> player */
     this.players = new Map();
-    /** @type {Map<string, object>} gemId -> gem */
+    /**
+     * 地面宝石已移除(宝石改为通关奖励)。
+     * 保留这个空 Map 是为了让旧代码路径不至于崩,新代码不应再往里写。
+     * @type {Map<string, object>}
+     */
     this.gems = new Map();
     /** @type {Map<string, object>} petId -> pet */
     this.pets = new Map();
     this.tick = 0;
-    this.spawnGems();
     this.spawnPets();
   }
 
+  /**
+   * 地面宝石生成已废弃。
+   * 宝石现在只由 gems.js 在通关时发放。
+   */
   spawnGems() {
-    const points = shuffle([...GEM_SPAWN_POINTS]).slice(0, GAME.maxGems);
-    for (const point of points) {
-      const gem = {
-        gemId: crypto.randomUUID(),
-        pos: { x: point.x, y: 0, z: point.z },
-        respawnAt: 0,
-        active: true,
-      };
-      this.gems.set(gem.gemId, gem);
-    }
+    // 故意留空:不再在地图刷宝石
   }
 
   spawnPets() {
@@ -363,8 +387,11 @@ export class World {
       return;
     }
 
-    // 3. 踩到 goal → 通关(同一关只触发一次)
-    if (reachedGoal(stage, player.pos) && !player.clearedStages.has(stage.id)) {
+    // 3. 踩到 goal → 通关
+    // 每次进入关卡只触发一次;重复通关也要触发,客户端才能提示
+    // "本关已通关,不再获得宝石奖励"。宝石是否发放由数据库的 first_gems_rewarded 决定。
+    if (reachedGoal(stage, player.pos) && !player.clearedThisRun) {
+      player.clearedThisRun = true;
       player.clearedStages.add(stage.id);
       player.stageEnteredAt = null;
       const elapsed = player.stageStartedAt ? now - player.stageStartedAt : 0;
@@ -386,6 +413,7 @@ export class World {
     player.onGround = false;
     player.checkpoint = stage.checkpoints[0] ?? null;
     player.stageStartedAt = now;
+    player.clearedThisRun = false;
   }
 
   /** 把玩家送回 lobby。 */
@@ -433,7 +461,9 @@ export class World {
         }
       }
 
-      const groundHeight = stage ? groundHeightAt(stage, player.pos, now) : null;
+      const groundHeight = stage
+        ? (groundHeightAt(stage, player.pos, now) ?? NO_GROUND)
+        : treadmillSupportHeight(player.pos);
 
       integratePlayer(
         player,

@@ -48,6 +48,14 @@ export const PALETTE = {
   /** 蛋 */
   egg: 0xe8d2a4,
   eggShell: 0xc9973f,
+  /**
+   * 跑步机踏板:明显的可交互材质,和普通地面拉开。
+   * 底板深、踏板亮,一眼能看出"这块可以踩"。
+   */
+  treadmillBase: 0x3b332a,
+  treadmillPad: 0xb07a2e,
+  treadmillPadActive: 0xe5a84b,
+  treadmillRail: 0x6a5a44,
 };
 
 /** 地图参数。改这里就能改场地大小与密度。 */
