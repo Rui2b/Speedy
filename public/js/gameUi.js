@@ -74,6 +74,9 @@ export class GameUi {
       skinList: document.getElementById('skin-list'),
       rewardsPanel: document.getElementById('rewards-panel'),
       rewardsProgress: document.getElementById('rewards-progress'),
+      rewardsStage: document.getElementById('rewards-stage'),
+      rewardsMilestone: document.getElementById('rewards-milestone'),
+      rewardsTreadmill: document.getElementById('rewards-treadmill'),
       bagPanel: document.getElementById('bag-panel'),
       bagList: document.getElementById('bag-list'),
 
@@ -103,6 +106,8 @@ export class GameUi {
     this.lastTreadmillSignature = '';
     /** 当前皮肤,由欢迎消息与选择面板共同维护 */
     this.currentSkinId = '';
+    /** 服务端下发的宝石曲线,给奖励面板显示用 */
+    this.gemConfig = null;
     /** 拖尾开关(纯客户端视觉) */
     this.trailOn = true;
 
@@ -185,6 +190,9 @@ export class GameUi {
     if (Number.isFinite(msg.config?.treadmillSessionMs)) {
       this.sessionMs = msg.config.treadmillSessionMs;
     }
+    if (msg.config?.gems) {
+      this.gemConfig = msg.config.gems;
+    }
     this.el.currentRoom.textContent = this.currentRoom;
     this.renderTreadmills();
     this.renderStages();
@@ -260,13 +268,52 @@ export class GameUi {
     if (!this.el.skinPanel.hidden) this.renderSkins();
   }
 
-  /** 奖励说明里的数字跟着服务端下发的配置走,避免写死。 */
+  /**
+   * 奖励说明。
+   *
+   * 数字全部来自服务端下发的宝石曲线,不在前端写死;
+   * 公式与服务端 gems.js 一致,这样面板和真实发放永远对得上。
+   */
   renderRewards() {
     if (!this.el.rewardsPanel) return;
+
+    const g = this.gemConfig;
+    if (g) {
+      // floor(base * ln(stage + 1)),第一关就是 floor(base * ln2)
+      const first = Math.min(
+        g.maxPerStage,
+        Math.max(1, Math.floor(g.baseReward * Math.log(2))),
+      );
+      const tenth = Math.min(
+        g.maxPerStage,
+        Math.max(1, Math.floor(g.baseReward * Math.log(11))),
+      );
+      const firstMilestone = Math.min(
+        g.maxPerMilestone,
+        Math.max(1, Math.floor(g.milestoneBase * Math.log(2))),
+      );
+
+      if (this.el.rewardsStage) {
+        this.el.rewardsStage.textContent =
+          first === tenth ? `${first} gems` : `${first} to ${tenth} gems`;
+      }
+      if (this.el.rewardsMilestone) {
+        this.el.rewardsMilestone.textContent =
+          `${firstMilestone} gems and up, every ${g.milestoneEvery} stages`;
+      }
+    }
+
+    if (this.el.rewardsTreadmill) {
+      this.el.rewardsTreadmill.textContent = `${formatMinutes(this.sessionMs)} of extra speed`;
+    }
+
     const cleared = this.progress?.clearedStages?.length ?? 0;
     if (this.el.rewardsProgress) {
+      const total = this.stages.length || 0;
       this.el.rewardsProgress.textContent =
-        cleared === 0 ? 'No stages cleared yet' : `Cleared ${cleared} of ${this.stages.length} stages`;
+        cleared === 0
+          ? 'No stages cleared yet'
+          : `Cleared ${cleared}${total ? ` of ${total}` : ''} stages`;
     }
   }
 
@@ -336,13 +383,30 @@ export class GameUi {
    * 奖励浮层:首次通关时在宝石计数旁浮出 "+N"。
    * 只做视觉反馈,数值本身以服务端下发为准。
    */
+  /**
+   * 奖励浮层:通关拿宝石时在宝石计数旁浮出一张短卡片。
+   *
+   * 只做视觉反馈,数值本身以服务端下发为准。
+   * @param {number|string} amount 已经算好的增量,例如 2
+   * @param {string} [detail] 拆解说明,例如 "1 stage + 1 milestone"
+   */
   floatReward(amount, detail = '') {
     const host = this.el.gems?.parentElement ?? this.el.gems;
     if (!host) return;
 
     const node = document.createElement('span');
     node.className = 'reward-float';
-    node.innerHTML = `<strong>+${amount}</strong>${detail ? `<em>${detail}</em>` : ''}`;
+
+    const value = document.createElement('strong');
+    value.textContent = `+${amount}`;
+    node.appendChild(value);
+
+    if (detail) {
+      const note = document.createElement('em');
+      note.textContent = detail;
+      node.appendChild(note);
+    }
+
     host.appendChild(node);
 
     requestAnimationFrame(() => node.classList.add('is-in'));

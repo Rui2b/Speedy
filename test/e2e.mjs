@@ -231,6 +231,14 @@ async function main() {
   const welcomeA = await clientA.waitFor((m) => m.type === 'welcome', 20000);
   record('welcome carries the self state', Boolean(welcomeA.self?.pos) && typeof welcomeA.uid === 'string');
   record('welcome carries server config', welcomeA.config?.tickRate === 20 && welcomeA.config?.broadcastRate === 10);
+  // 奖励面板要显示真实宝石曲线,所以曲线必须随 welcome 下发
+  record(
+    'welcome carries the gem curve',
+    Number.isFinite(welcomeA.config?.gems?.baseReward) &&
+      Number.isFinite(welcomeA.config?.gems?.milestoneEvery) &&
+      welcomeA.config.gems.baseReward > 0,
+    JSON.stringify(welcomeA.config?.gems ?? null),
+  );
 
   const welcomeB = await clientB.waitFor((m) => m.type === 'welcome', 20000);
 

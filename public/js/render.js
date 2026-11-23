@@ -50,6 +50,8 @@ export class GameView {
     this.currentSkinId = DEFAULT_SKIN;
     /** 拖尾开关(默认开) */
     this.trailEnabled = true;
+    /** 当前所在关卡;null 表示在 lobby,关卡几何不显示 */
+    this.inStage = null;
     this.predicted = new THREE.Vector3(0, 0, 0);
     this.authoritative = new THREE.Vector3(0, 0, 0);
     this.authoritativeVel = new THREE.Vector3(0, 0, 0);
@@ -126,6 +128,7 @@ export class GameView {
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.02;
     this.scene.add(ground);
+    this.lobbyGround = ground;
 
     this.buildTileFloor();
     this.buildZoneMarkings();
@@ -206,6 +209,8 @@ export class GameView {
    * 全部是贴地的薄片,不参与碰撞。
    */
   buildZoneMarkings() {
+    const markings = new THREE.Group();
+
     // 跑动区外圈:一圈醒目的虚线,告诉玩家"里面踩上去就涨速度"
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(
@@ -223,7 +228,7 @@ export class GameView {
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.1;
-    this.scene.add(ring);
+    markings.add(ring);
 
     // 外缘护栏轮廓:一圈细环,给场地一个收口
     const boundary = new THREE.Mesh(
@@ -238,7 +243,10 @@ export class GameView {
     );
     boundary.rotation.x = -Math.PI / 2;
     boundary.position.y = 0.09;
-    this.scene.add(boundary);
+    markings.add(boundary);
+
+    this.lobbyMarkings = markings;
+    this.scene.add(markings);
   }
 
   /** 关卡入口的地面色块。拿到关卡配置后调用。 */
@@ -773,7 +781,11 @@ export class GameView {
 
     for (const stage of stages) {
       for (const solid of stage.solids) {
-        this.stageGroup.add(this.makeBoxMesh(solid.box, PALETTE.platformSolid));
+        // 起点平台用暖色区分,和中间的跳跃平台分开
+        const isStart = String(solid.id).includes('start');
+        this.stageGroup.add(
+          this.makeBoxMesh(solid.box, isStart ? PALETTE.treadmill[0].pad : PALETTE.platformSolid),
+        );
       }
 
       for (const blinker of stage.blinkers) {
@@ -815,7 +827,39 @@ export class GameView {
       this.goalMeshes.set(stage.id, goal);
     }
 
+    // 关卡平台在 z≈-120 之外,和 lobby 是两块独立空间。
+    // 不进关卡就不要显示,否则从 lobby 抬头能看到一串悬空的板子。
+    this.stageGroup.visible = this.inStage !== null && this.inStage !== undefined;
+
+    // 关卡里加一层地面色带,避免玩家悬在纯色天空里不知道掉到哪
+    const stageFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(90, 90),
+      new THREE.MeshStandardMaterial({ color: PALETTE.walkZone, roughness: 1 }),
+    );
+    stageFloor.rotation.x = -Math.PI / 2;
+    stageFloor.position.y = -14;
+    this.stageGroup.add(stageFloor);
+
     this.scene.add(this.stageGroup);
+  }
+
+  /**
+   * 进入 / 离开关卡时切换关卡几何的可见性。
+   * 只影响渲染:玩家能不能进关卡完全由服务端判定。
+   */
+  setInStage(stageId) {
+    this.inStage = stageId ?? null;
+    if (this.stageGroup) this.stageGroup.visible = this.inStage !== null;
+
+    // lobby 的地板/装饰在关卡里要收起:两块空间不重叠,
+    // 同时画着会让画面出现"远处有另一片场地"的错位感。
+    const inLobby = this.inStage === null;
+    if (this.tileFloor) this.tileFloor.visible = inLobby;
+    if (this.lobbyGround) this.lobbyGround.visible = inLobby;
+    if (this.lobbyMarkings) this.lobbyMarkings.visible = inLobby;
+    if (this.treadmillGroup) this.treadmillGroup.visible = inLobby;
+    if (this.decorGroup) this.decorGroup.visible = inLobby;
+    if (this.entranceGroup) this.entranceGroup.visible = inLobby;
   }
 
   /** 由 AABB 生成一个盒子网格。 */

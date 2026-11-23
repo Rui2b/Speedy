@@ -455,6 +455,8 @@ function handleServerMessage(msg) {
       } else {
         state.inStage = msg.stageId;
       }
+      // 关卡几何只在该玩家进入关卡时显示,避免从 lobby 看到悬空的平台
+      view.setInStage(state.inStage);
       break;
 
     case 'world_snapshot':
@@ -594,17 +596,14 @@ function handleStageClear(msg) {
     return;
   }
 
-  const parts = [];
-  if (msg.stageGems > 0) parts.push(`${msg.stageGems} gems`);
-  if (msg.milestoneGems > 0) parts.push(`${msg.milestoneGems} milestone gems`);
+  const parts = [`${msg.stageGems} stage`];
+  if (msg.milestoneGems > 0) parts.push(`${msg.milestoneGems} milestone`);
 
-  const gems = msg.totalGems > 0 ? `+${msg.totalGems} gems` : 'no gems';
-  const detail = parts.length > 1 ? ` (${parts.join(' + ')})` : '';
-
-  hud.toast(`First clear. ${gems}${detail}`, 'good');
+  hud.toast(`First clear. +${msg.totalGems} gems (${parts.join(' + ')})`, 'good');
 
   if (msg.totalGems > 0) {
-    gameUi.floatReward(`${msg.totalGems}`, `${msg.stageGems} stage${msg.milestoneGems > 0 ? ` + ${msg.milestoneGems} milestone` : ''}`);
+    // 浮字只负责显示:总数进大字,拆解进小字
+    gameUi.floatReward(msg.totalGems, parts.join(' + '));
   }
 
   for (const group of msg.newMilestones ?? []) {
@@ -805,6 +804,13 @@ if (typeof window !== 'undefined') {
     /** 渲染开销,排查掉帧时用 */
     get perf() {
       return view.perfSnapshot?.() ?? null;
+    },
+    /**
+     * 触发一次奖励浮字,仅用于自动化验证视觉反馈。
+     * 真实数值仍由服务端 stage_clear 消息驱动,这里不改变任何状态。
+     */
+    previewReward(amount = 2, detail = 'first clear') {
+      gameUi.floatReward(String(amount), detail);
     },
   };
 }

@@ -319,6 +319,18 @@ export class GameRoom {
         treadmillSessionMs: TREADMILL.sessionMs,
         rebirthMinSpeed: SPEED_CFG.rebirthMinSpeed,
         petSyncEveryNTicks: PETS.syncEveryNTicks,
+        /**
+         * 宝石曲线。纯展示用:奖励面板要告诉玩家"首通给多少"。
+         * 真正的发放判定仍然只在服务端 completeStage 里。
+         */
+        gems: {
+          baseReward: GEMS.baseReward,
+          maxPerStage: GEMS.maxPerStage,
+          milestoneEvery: GEMS.milestoneEvery,
+          milestoneBase: GEMS.milestoneBase,
+          maxPerMilestone: GEMS.maxPerMilestone,
+          starterGems: GEMS.starterGems,
+        },
       },
       stages: this.stages.map(serializeStage),
       progress: this.buildProgress(player),
