@@ -1,61 +1,84 @@
 /**
  * 美术资源与地图配置(与逻辑分离)。
  *
- * 世界是一圈黄昏的学校跑道:深色沥青、同心车道漆、粉笔标记。
- * 这里定义的颜色就是 3D 场地用的颜色,所以界面本身保持中性,
- * 让场地去承载色彩。
+ * 世界是一块明亮的数字踏板场地:柔和的浅色底、方格踏板地板,
+ * 用颜色区分「跑动区 / 跑步机底座 / 关卡入口」。
  *
- * 想换皮肤贴图 / 地图模型 / 配色,只改这个文件。
+ * 所有颜色都在这里,3D 场景与 UI 共用同一套色板,避免两处各写一份。
+ * 想换皮肤 / 地图配色,只改这个文件。
  */
 
-/** 皮肤定义:主体色 + 描边色(贴图留空则使用纯色)。 */
+/**
+ * 皮肤定义:主体色 + 描边色 + 拖尾色。
+ * 每个皮肤给一个明显不同的色相,方便在场上快速分辨谁是谁。
+ *
+ * 必须与 server/config.js 的 VALID_SKINS 保持一致:
+ * 皮肤是随 player_input 上报的,服务端会校验,多出来的会被拒绝。
+ */
 export const SKINS = {
-  classic: { body: 0xd9d3c6, accent: 0xe5a84b, map: null },
-  sprout: { body: 0xb9c9a4, accent: 0x8fae74, map: null },
-  ember: { body: 0xd99a7a, accent: 0xb4573a, map: null },
-  frost: { body: 0xb6c6d4, accent: 0x7e9bb5, map: null },
-  bolt: { body: 0xded3a9, accent: 0xc0a341, map: null },
-  shadow: { body: 0x8b8681, accent: 0x514c47, map: null },
+  classic: { body: 0xf3e7d3, accent: 0xf2a541, trail: 0xffc266, label: 'Classic' },
+  sprout: { body: 0xa8dfa0, accent: 0x4f9e59, trail: 0x8ee38a, label: 'Sprout' },
+  ember: { body: 0xffb09a, accent: 0xe35f3d, trail: 0xff8f6b, label: 'Ember' },
+  frost: { body: 0xa9d7f5, accent: 0x3d84c6, trail: 0x8fd0ff, label: 'Frost' },
+  bolt: { body: 0xffe58a, accent: 0xd9a300, trail: 0xffde5c, label: 'Bolt' },
+  shadow: { body: 0xb3adc9, accent: 0x6b5f8c, trail: 0xa79bd6, label: 'Shadow' },
 };
 
 export const DEFAULT_SKIN = 'classic';
 
-/** 场景配色:暖墨色系 + 琥珀跑道漆。 */
+/** 皮肤顺序,用于选择面板 */
+export const SKIN_ORDER = Object.keys(SKINS);
+
+/** 场景配色:明亮卡通 + 区域色块。 */
 export const PALETTE = {
-  sky: 0x14120f,
-  fog: 0x14120f,
-  ground: 0x24211d,
-  /** 内场与外缘之间磨旧的跑道铺装 */
-  track: 0x312c26,
-  groundEdge: 0x2a2724,
-  lane: 0x6f6659,
-  laneAccent: 0xe5a84b,
-  chalk: 0x8c8172,
-  gem: 0xe8d2a4,
-  gemGlow: 0xc9973f,
-  pet: 0xd8b0a8,
-  petOwned: 0xe0bb8a,
-  petHatched: 0x9fd3a5,
-  selfRing: 0xe5a84b,
-  otherRing: 0x7d766c,
-  /** Obby 平台 */
-  platformSolid: 0x3a352f,
-  platformBlink: 0x8a6a3a,
-  checkpoint: 0x7fb886,
-  goal: 0xe5a84b,
+  sky: 0xa8dcf5,
+  fog: 0xc9e9f7,
+  /** 场地外的浅色底 */
+  ground: 0xe8f1ec,
+  /** 方格踏板:两色交替,读起来像按键地板 */
+  tileA: 0xeefaf6,
+  tileB: 0xd2ece2,
+  /** 方格之间的缝:比砖亮,像打光后的接缝 */
+  tileSeam: 0xf7fdfb,
+  /** 跑动区:玩家靠跑动涨 speed 的整片区域,明显更暖更亮 */
+  walkZone: 0xfff0cf,
+  /** 跑动区里更亮的一圈,提示"这里踩上去就有速度" */
+  walkAccent: 0x3fc7a8,
+  /** 外缘 */
+  groundEdge: 0xbcd9d0,
+  lane: 0xf7fbf9,
+  laneAccent: 0x4fb9a1,
+  chalk: 0xffffff,
+  gem: 0xfff0b8,
+  gemGlow: 0xf5b942,
+  pet: 0xf6c8c2,
+  petOwned: 0xf7cf9a,
+  petHatched: 0x93dda0,
+  selfRing: 0xf2a541,
+  otherRing: 0x9bb3ab,
+  /** Obby 平台:明亮,和地面区分 */
+  platformSolid: 0x8ecae6,
+  platformBlink: 0xf2a541,
+  checkpoint: 0x5ecf89,
+  goal: 0xffc94d,
   /** 玩家拖尾 */
-  trail: 0xe5a84b,
+  trail: 0xffc266,
   /** 蛋 */
-  egg: 0xe8d2a4,
-  eggShell: 0xc9973f,
+  egg: 0xfff3d6,
+  eggShell: 0xf5b942,
   /**
-   * 跑步机踏板:明显的可交互材质,和普通地面拉开。
-   * 底板深、踏板亮,一眼能看出"这块可以踩"。
+   * 跑步机:三档各自一个主色,不看文字也能分辨档位。
+   * 底板深一档、踏板亮一档,一眼能看出"这块可以踩"。
    */
-  treadmillBase: 0x3b332a,
-  treadmillPad: 0xb07a2e,
-  treadmillPadActive: 0xe5a84b,
-  treadmillRail: 0x6a5a44,
+  treadmill: [
+    { base: 0xd9cbb5, pad: 0xf2a541, padActive: 0xffd166, rail: 0xb99a72 },
+    { base: 0xc9d4dd, pad: 0x4fa3d9, padActive: 0x86d0ff, rail: 0x85a3bd },
+    { base: 0xd8c9e8, pad: 0xa06fd6, padActive: 0xd2a6ff, rail: 0xa98cc8 },
+  ],
+  /** 关卡入口平台的颜色 */
+  stageEntry: 0xa98ce8,
+  /** 装饰方块 */
+  decor: [0xffd166, 0x8ecae6, 0x9fe6b8, 0xffb4a2],
 };
 
 /** 地图参数。改这里就能改场地大小与密度。 */
@@ -68,8 +91,10 @@ export const MAP = {
   laneWidth: 0.16,
   /** 车道中心线间距(米) */
   laneSpacing: 5.4,
-  ambientIntensity: 1.05,
-  directionalIntensity: 1.5,
+  /** 方格踏板的边长(米)。越小越密,开销越高 */
+  tileSize: 3.2,
+  ambientIntensity: 1.3,
+  directionalIntensity: 1.15,
   /** 本地预测速度(仅视觉,真实速度由服务器决定) */
   predictedSpeed: 6,
   camera: {

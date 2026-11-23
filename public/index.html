@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="light" />
   <meta name="description" content="A browser 3D playground. Run the field, clear stages for gems, and hatch pets. The server owns every position." />
   <title>Speedy</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -61,13 +61,88 @@
       </div>
     </header>
 
-    <!-- 左侧:房间 / 关卡 / 跑步机 / 重生 -->
+    <!-- Left rail: rebirth, pets, skins -->
+    <nav class="rail rail-left" id="rail-left" aria-label="Player actions" hidden>
+      <button type="button" class="rail-btn" id="rail-rebirth" title="Rebirth (R)">
+        <span class="rail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <path d="M3 4v5h5" />
+          </svg>
+        </span>
+        <span class="rail-label">Rebirth</span>
+        <span class="rail-badge" id="rail-rebirth-badge" hidden></span>
+      </button>
+
+      <button type="button" class="rail-btn" id="rail-pets" title="Pets (B)">
+        <span class="rail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 21c4 0 7-2.6 7-6 0-3.4-3-6.5-7-9-4 2.5-7 5.6-7 9 0 3.4 3 6 7 6Z" />
+            <circle cx="12" cy="13" r="1.6" />
+          </svg>
+        </span>
+        <span class="rail-label">Pets</span>
+        <span class="rail-badge" id="rail-pets-badge">0</span>
+      </button>
+
+      <button type="button" class="rail-btn" id="rail-skins" title="Skins">
+        <span class="rail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="8" r="3.4" />
+            <path d="M4.5 20c1.2-3.6 4-5.4 7.5-5.4S18.3 16.4 19.5 20" />
+          </svg>
+        </span>
+        <span class="rail-label">Skins</span>
+      </button>
+    </nav>
+
+    <!-- Right rail: rewards and leaderboard -->
+    <nav class="rail rail-right" id="rail-right" aria-label="Rewards" hidden>
+      <button type="button" class="rail-btn" id="rail-rewards" title="Rewards">
+        <span class="rail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 4h8v3a4 4 0 0 1-8 0V4Z" />
+            <path d="M16 5h3v2a3 3 0 0 1-3 3M8 5H5v2a3 3 0 0 0 3 3" />
+            <path d="M12 11v5M9 20h6l-.6-4H9.6L9 20Z" />
+          </svg>
+        </span>
+        <span class="rail-label">Rewards</span>
+      </button>
+
+      <button type="button" class="rail-btn" id="rail-trails" title="Trail toggle">
+        <span class="rail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 17c3.5 0 4-3 7.5-3S15 17 20 17" />
+            <path d="M4 11c3.5 0 4-3 7.5-3S15 11 20 11" opacity=".55" />
+          </svg>
+        </span>
+        <span class="rail-label">Trail</span>
+        <span class="rail-badge rail-badge-dot" id="rail-trails-state">On</span>
+      </button>
+    </nav>
+
+    <!-- 左侧:房间 / 跑步机 / 关卡(功能已移到侧边栏的不在这里) -->
     <aside id="side-panel" class="side-panel" hidden>
       <section class="panel-block">
         <h2 class="panel-title">Room</h2>
         <div class="panel-row">
           <span class="panel-value" id="current-room">lobby-1</span>
           <button type="button" class="mini-btn" id="btn-room">Change</button>
+        </div>
+      </section>
+
+      <section class="panel-block">
+        <h2 class="panel-title">Rebirth</h2>
+        <div class="rebirth-meter" id="rebirth-meter">
+          <div class="rebirth-meter-track">
+            <div class="rebirth-meter-fill" id="rebirth-meter-fill"></div>
+          </div>
+          <p class="rebirth-meter-text" id="rebirth-sub">Needs 100 speed</p>
         </div>
       </section>
 
@@ -81,13 +156,6 @@
         <div id="stage-list" class="stage-list"></div>
         <button type="button" class="mini-btn wide" id="btn-exit-stage" hidden>Back to lobby</button>
       </section>
-
-      <section class="panel-block">
-        <button type="button" class="rebirth-btn" id="btn-rebirth">
-          <span class="rebirth-title">Rebirth</span>
-          <span class="rebirth-sub" id="rebirth-sub">Needs 100 speed</span>
-        </button>
-      </section>
     </aside>
 
     <!-- 右侧:排行榜 -->
@@ -96,25 +164,56 @@
       <ol id="leaderboard-rows" class="leaderboard-rows"></ol>
     </aside>
 
-    <!-- 背包按钮 -->
-    <button type="button" class="bag-btn" id="btn-bag" hidden>
-      Pets <span class="bag-count" id="bag-count">0</span>
-    </button>
+    <!-- 皮肤选择 -->
+    <div id="skin-panel" class="drawer" hidden>
+      <div class="bag-head">
+        <h2 class="panel-title">Skins</h2>
+        <button type="button" class="mini-btn" data-close="skin-panel">Close</button>
+      </div>
+      <p class="drawer-hint">Pick a colour so other players can tell you apart.</p>
+      <div id="skin-list" class="skin-list"></div>
+    </div>
+
+    <!-- 奖励说明 -->
+    <div id="rewards-panel" class="drawer" hidden>
+      <div class="bag-head">
+        <h2 class="panel-title">Rewards</h2>
+        <button type="button" class="mini-btn" data-close="rewards-panel">Close</button>
+      </div>
+      <p class="drawer-hint">
+        Gems come from clearing a stage the first time. Replays still raise speed.
+      </p>
+      <dl class="rewards-list">
+        <div class="rewards-row">
+          <dt>Stage first clear</dt>
+          <dd id="rewards-stage">about 2 gems</dd>
+        </div>
+        <div class="rewards-row">
+          <dt>Every 10 new stages</dt>
+          <dd id="rewards-milestone">8 gems and up</dd>
+        </div>
+        <div class="rewards-row">
+          <dt>Treadmill pass</dt>
+          <dd id="rewards-treadmill">10 minutes each</dd>
+        </div>
+      </dl>
+      <p class="drawer-note" id="rewards-progress">Cleared 0 stages</p>
+    </div>
 
     <!-- 背包面板 -->
-    <div id="bag-panel" class="bag-panel" hidden>
+    <div id="bag-panel" class="drawer" hidden>
       <div class="bag-head">
         <h2 class="panel-title">Your pets</h2>
-        <button type="button" class="mini-btn" id="btn-bag-close">Close</button>
+        <button type="button" class="mini-btn" data-close="bag-panel">Close</button>
       </div>
       <div id="bag-list" class="bag-list"></div>
     </div>
 
     <!-- 房间选择 -->
-    <div id="room-panel" class="room-panel" hidden>
+    <div id="room-panel" class="drawer" hidden>
       <div class="bag-head">
         <h2 class="panel-title">Rooms</h2>
-        <button type="button" class="mini-btn" id="btn-room-close">Close</button>
+        <button type="button" class="mini-btn" data-close="room-panel">Close</button>
       </div>
       <p class="room-hint">
         Type a room name. If it does not exist yet, it is created for you.

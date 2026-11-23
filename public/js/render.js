@@ -19,14 +19,17 @@ export class GameView {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: true,
+      // Chromebook 集显上 MSAA 很贵;靠像素比控制清晰度就够了
+      antialias: false,
       powerPreference: 'high-performance',
+      stencil: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     this.renderer.setClearColor(PALETTE.sky, 1);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(PALETTE.fog, 52, 108);
+    // 明亮的卡通场地不需要雾:有雾会把整块地压成灰绿一片
+    this.scene.background = new THREE.Color(PALETTE.sky);
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 260);
     this.camera.position.set(0, MAP.camera.height, MAP.camera.distance);
@@ -43,6 +46,10 @@ export class GameView {
 
     this.selfUid = null;
     this.selfGroup = null;
+    /** 本地玩家当前皮肤,拖尾颜色跟着走 */
+    this.currentSkinId = DEFAULT_SKIN;
+    /** 拖尾开关(默认开) */
+    this.trailEnabled = true;
     this.predicted = new THREE.Vector3(0, 0, 0);
     this.authoritative = new THREE.Vector3(0, 0, 0);
     this.authoritativeVel = new THREE.Vector3(0, 0, 0);
@@ -74,6 +81,7 @@ export class GameView {
     this.scene.add(this.treadmillGroup);
 
     this.buildEnvironment();
+    this.buildDecor();
     this.selfGroup = this.createPlayerMesh({ skinId: DEFAULT_SKIN, isSelf: true });
     this.selfGroup.visible = false;
     this.scene.add(this.selfGroup);
@@ -93,135 +101,233 @@ export class GameView {
    * 环境
    * ------------------------------------------------------------------ */
   buildEnvironment() {
-    const hemi = new THREE.HemisphereLight(0x9fb2c9, 0x120f0c, MAP.ambientIntensity);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x9fc8bb, MAP.ambientIntensity);
     this.scene.add(hemi);
 
-    // 单侧低位主光,像球场探照灯
-    const key = new THREE.DirectionalLight(0xffe6bd, MAP.directionalIntensity);
-    key.position.set(-26, 22, 18);
+    // 主光偏上偏前,让踏板的高差看得出来
+    const key = new THREE.DirectionalLight(0xfff6e2, MAP.directionalIntensity);
+    key.position.set(-18, 30, 14);
     this.scene.add(key);
 
-    const rim = new THREE.DirectionalLight(0x6f8bb0, 0.5);
-    rim.position.set(24, 10, -22);
+    // 冷色补光,给右侧一点层次
+    const rim = new THREE.DirectionalLight(0xbfe0ff, 0.55);
+    rim.position.set(22, 14, -20);
     this.scene.add(rim);
 
-    // 地面
+    // 场地外圈底板
     const ground = new THREE.Mesh(
-      new THREE.CircleGeometry(MAP.worldRadius + 4, 96),
+      new THREE.CircleGeometry(MAP.worldRadius + 6, 72),
       new THREE.MeshStandardMaterial({
         color: PALETTE.ground,
-        roughness: 0.98,
+        roughness: 0.95,
         metalness: 0,
       }),
     );
     ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.02;
     this.scene.add(ground);
 
-    // 跑道本体:内场与外墙之间一圈磨旧的铺装,比地面略暖
-    const trackInner = MAP.laneSpacing;
-    const trackOuter = MAP.worldRadius - 0.6;
-    const track = new THREE.Mesh(
-      new THREE.RingGeometry(trackInner, trackOuter, 128),
-      new THREE.MeshStandardMaterial({
-        color: PALETTE.track,
-        roughness: 0.95,
-        metalness: 0.02,
-      }),
+    this.buildTileFloor();
+    this.buildZoneMarkings();
+  }
+
+  /**
+   * 方格按键式地板。
+   *
+   * 用一整片 InstancedMesh 铺出来,几百块砖只有一次 draw call,
+   * Chromebook 上也扛得住。离场地中心越远颜色越淡,形成柔和边界。
+   */
+  buildTileFloor() {
+    const radius = MAP.worldRadius;
+    const size = MAP.tileSize;
+    const half = Math.ceil(radius / size);
+
+    /** @type {Array<{x:number,z:number,odd:boolean}>} */
+    const cells = [];
+    for (let ix = -half; ix <= half; ix += 1) {
+      for (let iz = -half; iz <= half; iz += 1) {
+        const cx = (ix + 0.5) * size;
+        const cz = (iz + 0.5) * size;
+        // 只保留圆心在场地内的砖
+        if (Math.hypot(cx, cz) > radius) continue;
+        cells.push({ x: cx, z: cz, odd: (ix + iz) % 2 === 0 });
+      }
+    }
+
+    // 先在底下铺一层亮色整板,砖缝就会透出这层浅色
+    const seam = new THREE.Mesh(
+      new THREE.CircleGeometry(radius, 72),
+      new THREE.MeshStandardMaterial({ color: PALETTE.tileSeam, roughness: 0.95 }),
     );
-    track.rotation.x = -Math.PI / 2;
-    track.position.y = 0.006;
-    this.scene.add(track);
+    seam.rotation.x = -Math.PI / 2;
+    seam.position.y = 0.015;
+    this.scene.add(seam);
 
-    // 车道线:同心圆,其中一条用跑道漆(琥珀色)标出
-    const laneGroup = new THREE.Group();
-    for (let i = 1; i <= MAP.laneCount; i += 1) {
-      const radius = i * MAP.laneSpacing;
-      if (radius > MAP.worldRadius) break;
-      const isAccent = i === 2;
-      const ring = new THREE.Mesh(
-        new THREE.RingGeometry(radius - MAP.laneWidth / 2, radius + MAP.laneWidth / 2, 128),
-        new THREE.MeshBasicMaterial({
-          color: isAccent ? PALETTE.laneAccent : PALETTE.lane,
-          // Quiet enough to stay behind the gems and players
-          transparent: true,
-          opacity: isAccent ? 0.24 : 0.8,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-        }),
-      );
-      ring.rotation.x = -Math.PI / 2;
-      ring.position.y = 0.012 + i * 0.0006;
-      laneGroup.add(ring);
-    }
+    const geometry = new THREE.BoxGeometry(size * 0.92, 0.1, size * 0.92);
+    const material = new THREE.MeshStandardMaterial({
+      roughness: 0.95,
+      metalness: 0.02,
+    });
 
-    // 起跑线:横跨车道的一小段短线,类似错位起跑标记
-    for (let i = 1; i < MAP.laneCount; i += 1) {
-      const r = (i + 0.5) * MAP.laneSpacing;
-      if (r > MAP.worldRadius) break;
-      const dash = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.34, MAP.laneSpacing * 0.72),
-        new THREE.MeshBasicMaterial({
-          color: PALETTE.chalk,
-          transparent: true,
-          opacity: 0.55,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-        }),
-      );
-      dash.rotation.x = -Math.PI / 2;
-      dash.position.set(r, 0.016, 0);
-      laneGroup.add(dash);
-    }
+    const mesh = new THREE.InstancedMesh(geometry, material, cells.length);
+    mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 
-    // 外缘的粉笔边界
-    const boundary = new THREE.Mesh(
-      new THREE.RingGeometry(MAP.worldRadius - 0.42, MAP.worldRadius - 0.12, 128),
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    const baseA = new THREE.Color(PALETTE.tileA);
+    const baseB = new THREE.Color(PALETTE.tileB);
+
+    cells.forEach((cell, index) => {
+      dummy.position.set(cell.x, 0.02, cell.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+
+      // 内圈是"跑动涨 speed"的区域,用暖色标出来,和外圈冷色方格拉开
+      const dist = Math.hypot(cell.x, cell.z);
+      if (dist <= MAP.laneSpacing * 2.1) {
+        color.setHex(PALETTE.walkZone).offsetHSL(0, 0, cell.odd ? 0.02 : -0.02);
+      } else {
+        color.copy(cell.odd ? baseA : baseB);
+      }
+      mesh.setColorAt(index, color);
+    });
+
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+    this.tileFloor = mesh;
+    this.scene.add(mesh);
+  }
+
+  /**
+   * 区域标记:跑动区的外圈、以及三个关卡入口的色块。
+   * 全部是贴地的薄片,不参与碰撞。
+   */
+  buildZoneMarkings() {
+    // 跑动区外圈:一圈醒目的虚线,告诉玩家"里面踩上去就涨速度"
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(
+        MAP.laneSpacing * 2.1 - 0.22,
+        MAP.laneSpacing * 2.1,
+        96,
+      ),
       new THREE.MeshBasicMaterial({
-        color: PALETTE.chalk,
+        color: PALETTE.walkAccent,
         transparent: true,
         opacity: 0.85,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),
     );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.1;
+    this.scene.add(ring);
+
+    // 外缘护栏轮廓:一圈细环,给场地一个收口
+    const boundary = new THREE.Mesh(
+      new THREE.RingGeometry(MAP.worldRadius - 0.35, MAP.worldRadius - 0.1, 96),
+      new THREE.MeshBasicMaterial({
+        color: PALETTE.groundEdge,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
     boundary.rotation.x = -Math.PI / 2;
-    boundary.position.y = 0.03;
-    laneGroup.add(boundary);
+    boundary.position.y = 0.09;
+    this.scene.add(boundary);
+  }
 
-    this.scene.add(laneGroup);
+  /** 关卡入口的地面色块。拿到关卡配置后调用。 */
+  buildStageEntrances(stages) {
+    if (this.entranceGroup) {
+      this.entranceGroup.removeFromParent();
+      this.entranceGroup.traverse((obj) => {
+        obj.geometry?.dispose?.();
+        obj.material?.dispose?.();
+      });
+    }
+    this.entranceGroup = new THREE.Group();
 
-    // 径向刻度,类似外缘附近的车道分隔
-    const ticks = new THREE.Group();
-    for (let i = 0; i < 32; i += 1) {
-      const angle = (i / 32) * Math.PI * 2;
-      const tick = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.1, 2.2),
-        new THREE.MeshBasicMaterial({
-          color: PALETTE.chalk,
-          transparent: true,
-          opacity: 0.3,
-          side: THREE.DoubleSide,
-          depthWrite: false,
+    // 三个入口沿一条直线排在外圈,和"进入关卡"的列表顺序一致
+    const count = Math.min(3, (stages ?? []).length);
+    const spacing = 11;
+    for (let i = 0; i < count; i += 1) {
+      const stage = stages[i];
+      const x = (i - (count - 1) / 2) * spacing;
+      const z = MAP.worldRadius - 8;
+
+      const pad = new THREE.Mesh(
+        new THREE.BoxGeometry(9, 0.16, 9),
+        new THREE.MeshStandardMaterial({
+          color: PALETTE.stageEntry,
+          roughness: 0.75,
+          metalness: 0.05,
+          emissive: PALETTE.stageEntry,
+          emissiveIntensity: 0.1,
         }),
       );
-      tick.rotation.x = -Math.PI / 2;
-      tick.rotation.z = -angle;
-      const r = MAP.worldRadius - 2.2;
-      tick.position.set(Math.cos(angle) * r, 0.014, Math.sin(angle) * r);
-      ticks.add(tick);
-    }
-    this.scene.add(ticks);
+      pad.position.set(x, 0.1, z);
+      this.entranceGroup.add(pad);
 
-    // 远处探照灯:只在场地边缘留暖色光斑,画面上不出现灯具,
-    // 照亮外圈车道又不添杂物
-    for (let i = 0; i < 4; i += 1) {
-      const angle = Math.PI / 4 + (i * Math.PI) / 2;
-      const px = Math.cos(angle) * (MAP.worldRadius + 5);
-      const pz = Math.sin(angle) * (MAP.worldRadius + 5);
-      const glow = new THREE.PointLight(0xffd39b, 12, 26, 2);
-      glow.position.set(px, 4.5, pz);
-      this.scene.add(glow);
+      // 入口中间一个亮色箭头,脚尖方向指向场地中心
+      const arrow = new THREE.Mesh(
+        new THREE.ConeGeometry(1.1, 2.2, 4),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 }),
+      );
+      arrow.rotation.x = Math.PI / 2;
+      arrow.position.set(x, 0.6, z - 5.2);
+      this.entranceGroup.add(arrow);
+
+      if (stage) pad.userData.stageId = stage.id;
     }
+
+    this.scene.add(this.entranceGroup);
+  }
+
+  /**
+   * 大厅装饰:几个低模方块和立柱,只为消除空旷感。
+   * 全部是 BoxGeometry / CylinderGeometry,加起来十几个 draw call。
+   */
+  buildDecor() {
+    const group = new THREE.Group();
+    const r = MAP.worldRadius - 4;
+
+    // 一圈矮柱,当作场边栏杆柱
+    const postGeo = new THREE.CylinderGeometry(0.28, 0.34, 1.9, 8);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 });
+    for (let i = 0; i < 16; i += 1) {
+      const angle = (i / 16) * Math.PI * 2;
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(Math.cos(angle) * r, 0.95, Math.sin(angle) * r);
+      group.add(post);
+    }
+
+    // 几组错落的彩色方块,像场边的器材箱
+    const positions = [
+      [-16, -22, 1.1],
+      [17, -19, 0.9],
+      [-22, 12, 1.3],
+      [21, 15, 1.0],
+      [-6, -30, 0.8],
+      [8, 27, 1.2],
+    ];
+    positions.forEach(([x, z, scale], index) => {
+      const color = PALETTE.decor[index % PALETTE.decor.length];
+      const box = new THREE.Mesh(
+        new THREE.BoxGeometry(3.4 * scale, 1.6 * scale, 3.4 * scale),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 }),
+      );
+      box.position.set(x, 0.8 * scale, z);
+      box.rotation.y = (index * Math.PI) / 5;
+      group.add(box);
+    });
+
+    this.decorGroup = group;
+    this.scene.add(group);
   }
 
   /* ------------------------------------------------------------------ *
@@ -385,6 +491,11 @@ export class GameView {
       this.buildTreadmills(msg.config.treadmills);
     }
 
+    // 关卡入口色块
+    if (Array.isArray(msg.stages)) {
+      this.buildStageEntrances(msg.stages);
+    }
+
     this.lastSnapshotTick = msg.tick ?? 0;
   }
 
@@ -394,7 +505,22 @@ export class GameView {
     if (old) old.removeFromParent();
     fresh.position.copy(this.predicted);
     this.scene.add(fresh);
+    this.currentSkinId = skinId;
     return fresh;
+  }
+
+  /**
+   * 换皮肤。
+   *
+   * 只改本地模型和拖尾颜色。皮肤本身通过已有的 player_input 上报,
+   * 服务端会校验并在 roster 里广播,所以别人也能看到新颜色。
+   */
+  setSkin(skinId) {
+    if (!SKINS[skinId] || skinId === this.currentSkinId) return false;
+    this.selfGroup = this.rebuildSelfGroup(skinId);
+    this.selfGroup.visible = true;
+    this.setTrailColor(skinId);
+    return true;
   }
 
   applySnapshot(msg) {
@@ -535,6 +661,21 @@ export class GameView {
     else this.updateCamera(dt);
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * 渲染开销快照,只用于排查性能问题。
+   * 取自 WebGLRenderer.info,不额外渲染。
+   */
+  perfSnapshot() {
+    const info = this.renderer.info;
+    return {
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      programs: info.programs?.length ?? 0,
+    };
   }
 
   /**
@@ -731,18 +872,36 @@ export class GameView {
         (machine.min.z + machine.max.z) / 2,
       );
 
+      // 三档各自一套颜色,不看左侧文字也能分辨
+      const tier = treadmillTier(machine.id);
+      const look = PALETTE.treadmill[tier];
+
       // 底板:顶面正好是服务器判定的踏板高度,玩家会站在这个面上
       const padTop = machine.max.y;
       const base = new THREE.Mesh(
         new THREE.BoxGeometry(width, padTop, depth),
         new THREE.MeshStandardMaterial({
-          color: PALETTE.treadmillBase,
+          color: look.base,
           roughness: 0.9,
           metalness: 0.08,
         }),
       );
       base.position.y = padTop / 2;
       group.add(base);
+
+      // 造型差异:高档次多一层台面,肩高和颜色一起变化
+      if (tier > 0) {
+        const crown = new THREE.Mesh(
+          new THREE.BoxGeometry(width * 0.86, 0.12 * tier, depth * 0.86),
+          new THREE.MeshStandardMaterial({
+            color: look.pad,
+            roughness: 0.6,
+            metalness: 0.12,
+          }),
+        );
+        crown.position.y = padTop + 0.06 * tier;
+        group.add(crown);
+      }
 
       // 踏板:沿 z 方向一排,颜色与普通地面完全不同
       const padCount = 7;
@@ -752,10 +911,10 @@ export class GameView {
         const pad = new THREE.Mesh(
           new THREE.BoxGeometry(width - 0.5, 0.06, padDepth * 0.82),
           new THREE.MeshStandardMaterial({
-            color: PALETTE.treadmillPad,
+            color: look.pad,
             roughness: 0.55,
             metalness: 0.15,
-            emissive: PALETTE.treadmillPad,
+            emissive: look.pad,
             emissiveIntensity: 0.12,
           }),
         );
@@ -771,7 +930,7 @@ export class GameView {
         const rail = new THREE.Mesh(
           new THREE.BoxGeometry(0.12, 0.42, depth),
           new THREE.MeshStandardMaterial({
-            color: PALETTE.treadmillRail,
+            color: look.rail,
             roughness: 0.5,
             metalness: 0.35,
           }),
@@ -781,7 +940,7 @@ export class GameView {
       }
 
       this.treadmillGroup.add(group);
-      this.treadmillMeshes.set(machine.id, { group, pads, machine });
+      this.treadmillMeshes.set(machine.id, { group, pads, machine, look });
     }
   }
 
@@ -798,12 +957,11 @@ export class GameView {
     for (const [id, entry] of this.treadmillMeshes) {
       const until = activeUntil[id] ?? 0;
       const active = until > Date.now();
+      const look = entry.look;
 
       for (const pad of entry.pads) {
         const wave = 0.5 + 0.5 * Math.sin(t * 2.6 + pad.userData.phase);
-        pad.material.emissive.setHex(
-          active ? PALETTE.treadmillPadActive : PALETTE.treadmillPad,
-        );
+        pad.material.emissive.setHex(active ? look.padActive : look.pad);
         pad.material.emissiveIntensity = active ? 0.35 + wave * 0.45 : 0.08 + wave * 0.12;
         const scale = active ? 1 + wave * 0.012 : 1;
         pad.scale.set(scale, 1, scale);
@@ -826,24 +984,39 @@ export class GameView {
     }
   }
 
-  /** 给本地玩家创建拖尾。 */
-  ensureTrail() {
+  /** 给本地玩家创建拖尾。颜色跟着皮肤走。 */
+  ensureTrail(skinId = this.currentSkinId) {
     if (this.trail) return;
     const count = 24;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    const skin = SKINS[skinId] ?? SKINS[DEFAULT_SKIN];
     const mat = new THREE.PointsMaterial({
-      color: PALETTE.trail,
-      size: 0.22,
+      color: skin.trail ?? PALETTE.trail,
+      size: 0.26,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.6,
       depthWrite: false,
       sizeAttenuation: true,
     });
     this.trail = new THREE.Points(geo, mat);
     this.trail.frustumCulled = false;
+    this.trail.visible = this.trailEnabled !== false;
     this.trailHistory = [];
     this.scene.add(this.trail);
+  }
+
+  /** 切换皮肤时把拖尾颜色一起换掉,不用重建整个几何。 */
+  setTrailColor(skinId) {
+    if (!this.trail) return;
+    const skin = SKINS[skinId] ?? SKINS[DEFAULT_SKIN];
+    this.trail.material.color.setHex(skin.trail ?? PALETTE.trail);
+  }
+
+  /** 拖尾开关:纯视觉,关掉就隐藏,不重建几何。 */
+  setTrailVisible(on) {
+    this.trailEnabled = Boolean(on);
+    if (this.trail) this.trail.visible = this.trailEnabled;
   }
 
   /** 记录一个拖尾点(只在真的移动时)。 */
@@ -985,4 +1158,14 @@ export class GameView {
       this.trailHistory = [];
     }
   }
+}
+
+/**
+ * 从跑步机 id 推断档位(0/1/2),用来挑颜色和造型。
+ * id 形如 treadmill-1 / treadmill-2 / treadmill-3。
+ */
+function treadmillTier(id) {
+  const match = /(\d+)$/.exec(String(id ?? ''));
+  const n = match ? Number(match[1]) : 1;
+  return Math.max(0, Math.min(2, n - 1));
 }

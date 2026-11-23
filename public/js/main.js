@@ -13,6 +13,7 @@ import { ACTION_KEYS, findNearestGem, findNearestPet } from './targeting.js';
 import { TurnstileGate } from './turnstile.js';
 import { LocalPredictor } from './predictor.js';
 import { GameUi } from './gameUi.js';
+import { DEFAULT_SKIN, SKIN_ORDER } from './assets.js';
 
 const el = {
   canvas: document.getElementById('scene'),
@@ -63,6 +64,8 @@ const gameUi = new GameUi({
   onRebirth: () => net.send({ type: 'request_rebirth' }),
   onJoinRoom: (roomId) => net.send({ type: 'join_room', roomId }),
   onDeleteRoom: (roomId) => net.send({ type: 'delete_room', roomId }),
+  onPickSkin: (skinId, label) => pickSkin(skinId, label),
+  onTrailToggle: (on) => setTrailEnabled(on),
 });
 
 const gate = new TurnstileGate({
@@ -394,7 +397,15 @@ function handleServerMessage(msg) {
         predictor = new LocalPredictor(msg.physics);
         predictor.snapTo(state.lastSelfPos);
         view.predictor = predictor;
-        view.ensureTrail();
+
+        // 服务器存档里还是默认皮肤时,给这个账号挑一个稳定的区分色,
+        // 让场上的颜色天然错开。已有皮肤的账号保持原样。
+        const serverSkin = msg.skinId ?? DEFAULT_SKIN;
+        const skin = serverSkin === DEFAULT_SKIN ? pickStarterSkin(msg.uid) : serverSkin;
+        state.skinId = skin;
+        net.skinId = skin;
+        view.currentSkinId = skin;
+        view.ensureTrail(skin);
       }
 
       view.applyWelcome(msg);
@@ -737,6 +748,43 @@ function doHatch() {
 }
 
 /* ------------------------------------------------------------------------- *
+ * 皮肤与拖尾(纯客户端,皮肤借用已有的 player_input 字段上报)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 换皮肤。
+ *
+ * 服务端本来就接受 player_input 里的 skinId(有白名单校验),
+ * 所以这里不改协议:本地先换外观,下一包输入就把新皮肤带上去。
+ */
+function pickSkin(skinId, label) {
+  if (!view.setSkin(skinId)) return;
+  net.skinId = skinId;
+  state.skinId = skinId;
+  gameUi.applySkin(skinId);
+  gameUi.closeDrawers();
+  hud.toast(`Skin: ${label}`, 'good');
+}
+
+/**
+ * 新玩家的初始配色。
+ *
+ * 只在本地挑一个和别人不一样的,让场上颜色天然错开;
+ * 真正的皮肤仍然由服务端保存与广播。
+ */
+function pickStarterSkin(uid) {
+  if (!uid) return DEFAULT_SKIN;
+  let hash = 0;
+  for (let i = 0; i < uid.length; i += 1) hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
+  return SKIN_ORDER[hash % SKIN_ORDER.length];
+}
+
+/** 拖尾开关:只影响本地渲染,不向服务端发任何东西。 */
+function setTrailEnabled(on) {
+  view.setTrailVisible?.(on);
+}
+
+/* ------------------------------------------------------------------------- *
  * 只读调试钩子(便于自动化测试与排查)
  * ------------------------------------------------------------------------- */
 if (typeof window !== 'undefined') {
@@ -747,11 +795,16 @@ if (typeof window !== 'undefined') {
         gems: state.gems,
         online: state.online,
         pos: { ...state.lastSelfPos },
+        skinId: state.skinId,
         net: net.state,
         pets: state.pets.map((p) => ({ petId: p.petId, hatchProgress: p.hatchProgress })),
         gemsById: [...state.gemsById.entries()],
         petsById: [...state.petsById.entries()],
       };
+    },
+    /** 渲染开销,排查掉帧时用 */
+    get perf() {
+      return view.perfSnapshot?.() ?? null;
     },
   };
 }

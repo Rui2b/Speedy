@@ -4,6 +4,13 @@
  * 纯 DOM,和渲染循环解耦。所有数值都来自服务器下发,这里只负责显示与发请求。
  */
 
+/**
+ * 游戏界面:HUD 数值、侧边功能栏、抽屉(宠物/皮肤/奖励/房间)、排行榜。
+ *
+ * 纯 DOM,和渲染循环解耦。所有数值都来自服务器下发,这里只负责显示与发请求。
+ */
+import { SKINS, SKIN_ORDER } from './assets.js';
+
 const RARITY_LABEL = {
   common: 'Common',
   rare: 'Rare',
@@ -20,6 +27,8 @@ export class GameUi {
    * @param {() => void} handlers.onRebirth
    * @param {(roomId: string) => void} handlers.onJoinRoom
    * @param {(roomId: string) => void} handlers.onDeleteRoom
+   * @param {(skinId: string, label: string) => void} handlers.onPickSkin
+   * @param {(on: boolean) => void} handlers.onTrailToggle
    */
   constructor(handlers) {
     this.handlers = handlers;
@@ -42,27 +51,42 @@ export class GameUi {
       treadmillPromptBuy: document.getElementById('treadmill-prompt-buy'),
       stageList: document.getElementById('stage-list'),
       btnExitStage: document.getElementById('btn-exit-stage'),
-      btnRebirth: document.getElementById('btn-rebirth'),
-      rebirthSub: document.getElementById('rebirth-sub'),
+      btnRoom: document.getElementById('btn-room'),
 
       // 排行榜
       leaderboard: document.getElementById('leaderboard'),
       leaderboardRows: document.getElementById('leaderboard-rows'),
 
-      // 背包
-      bagBtn: document.getElementById('btn-bag'),
-      bagCount: document.getElementById('bag-count'),
+      // 侧边功能栏
+      railLeft: document.getElementById('rail-left'),
+      railRight: document.getElementById('rail-right'),
+      railRebirth: document.getElementById('rail-rebirth'),
+      railRebirthBadge: document.getElementById('rail-rebirth-badge'),
+      railPets: document.getElementById('rail-pets'),
+      railPetsBadge: document.getElementById('rail-pets-badge'),
+      railSkins: document.getElementById('rail-skins'),
+      railRewards: document.getElementById('rail-rewards'),
+      railTrails: document.getElementById('rail-trails'),
+      railTrailsState: document.getElementById('rail-trails-state'),
+
+      // 抽屉
+      skinPanel: document.getElementById('skin-panel'),
+      skinList: document.getElementById('skin-list'),
+      rewardsPanel: document.getElementById('rewards-panel'),
+      rewardsProgress: document.getElementById('rewards-progress'),
       bagPanel: document.getElementById('bag-panel'),
       bagList: document.getElementById('bag-list'),
-      btnBagClose: document.getElementById('btn-bag-close'),
 
       // 房间
-      btnRoom: document.getElementById('btn-room'),
       roomPanel: document.getElementById('room-panel'),
       roomList: document.getElementById('room-list'),
       roomInput: document.getElementById('room-input'),
       btnRoomJoin: document.getElementById('btn-room-join'),
-      btnRoomClose: document.getElementById('btn-room-close'),
+
+      // 转生进度条
+      rebirthMeter: document.getElementById('rebirth-meter'),
+      rebirthFill: document.getElementById('rebirth-meter-fill'),
+      rebirthSub: document.getElementById('rebirth-sub'),
     };
 
     /** 缓存的服务器状态 */
@@ -77,15 +101,18 @@ export class GameUi {
     /** 一次购买的有效时长,由 welcome.config 下发 */
     this.sessionMs = 10 * 60 * 1000;
     this.lastTreadmillSignature = '';
+    /** 当前皮肤,由欢迎消息与选择面板共同维护 */
+    this.currentSkinId = '';
+    /** 拖尾开关(纯客户端视觉) */
+    this.trailOn = true;
 
     this.wireEvents();
   }
 
   wireEvents() {
-    this.el.btnRebirth.addEventListener('click', () => this.handlers.onRebirth());
+    this.el.railRebirth.addEventListener('click', () => this.handlers.onRebirth());
     this.el.btnExitStage.addEventListener('click', () => this.handlers.onExitStage());
-    this.el.btnRoom.addEventListener('click', () => this.toggleRoomPanel());
-    this.el.btnRoomClose.addEventListener('click', () => this.toggleRoomPanel(false));
+    this.el.btnRoom.addEventListener('click', () => this.toggleDrawer('room-panel'));
     this.el.btnRoomJoin.addEventListener('click', () => this.joinTypedRoom());
     this.el.roomInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -93,8 +120,59 @@ export class GameUi {
         this.joinTypedRoom();
       }
     });
-    this.el.bagBtn.addEventListener('click', () => this.toggleBag());
-    this.el.btnBagClose.addEventListener('click', () => this.toggleBag(false));
+
+    this.el.railPets.addEventListener('click', () => this.toggleDrawer('bag-panel'));
+    this.el.railSkins.addEventListener('click', () => this.toggleDrawer('skin-panel'));
+    this.el.railRewards.addEventListener('click', () => this.toggleDrawer('rewards-panel'));
+    this.el.railTrails.addEventListener('click', () => this.toggleTrail());
+
+    // 抽屉右上角的关闭按钮统一走 data-close
+    for (const btn of document.querySelectorAll('[data-close]')) {
+      btn.addEventListener('click', () => this.closeDrawers());
+    }
+
+    // 点空白处收起抽屉(但不要挡住 canvas 的移动操作:只认点击背景)
+    document.addEventListener('pointerdown', (event) => {
+      if (event.target.closest('.drawer, .rail-btn, #btn-room')) return;
+      this.closeDrawers();
+    });
+  }
+
+  /**
+   * 打开/关闭一个抽屉。同一时间只留一个,避免互相盖住。
+   * @param {string} id
+   */
+  toggleDrawer(id) {
+    const target = document.getElementById(id);
+    if (!target) return;
+    const willOpen = target.hidden;
+
+    this.closeDrawers();
+    if (!willOpen) return;
+
+    target.hidden = false;
+    if (id === 'bag-panel') this.renderBag();
+    if (id === 'skin-panel') this.renderSkins();
+    if (id === 'rewards-panel') this.renderRewards();
+    if (id === 'room-panel') {
+      this.renderRooms();
+      this.el.roomInput.focus();
+    }
+  }
+
+  closeDrawers() {
+    for (const id of ['bag-panel', 'skin-panel', 'rewards-panel', 'room-panel']) {
+      const panel = document.getElementById(id);
+      if (panel) panel.hidden = true;
+    }
+  }
+
+  /** 拖尾开关:纯客户端视觉,不需要服务端参与。 */
+  toggleTrail() {
+    this.trailOn = !this.trailOn;
+    this.el.railTrailsState.textContent = this.trailOn ? 'On' : 'Off';
+    this.el.railTrails.classList.toggle('is-ready', this.trailOn);
+    this.handlers.onTrailToggle?.(this.trailOn);
   }
 
   /** 从 welcome 里初始化静态配置。 */
@@ -103,6 +181,7 @@ export class GameUi {
     this.currentRoom = msg.roomId ?? '';
     this.stages = msg.stages ?? [];
     this.treadmills = msg.config?.treadmills ?? [];
+    this.currentSkinId = msg.skinId ?? this.currentSkinId;
     if (Number.isFinite(msg.config?.treadmillSessionMs)) {
       this.sessionMs = msg.config.treadmillSessionMs;
     }
@@ -120,16 +199,17 @@ export class GameUi {
   show() {
     this.el.sidePanel.hidden = false;
     this.el.leaderboard.hidden = false;
-    this.el.bagBtn.hidden = false;
+    this.el.railLeft.hidden = false;
+    this.el.railRight.hidden = false;
   }
 
   /** 退出登录时收起所有面板。 */
   hide() {
     this.el.sidePanel.hidden = true;
     this.el.leaderboard.hidden = true;
-    this.el.bagBtn.hidden = true;
-    this.el.bagPanel.hidden = true;
-    this.el.roomPanel.hidden = true;
+    this.el.railLeft.hidden = true;
+    this.el.railRight.hidden = true;
+    this.closeDrawers();
     this.el.leaderboardRows.replaceChildren();
     this.el.bagList.replaceChildren();
     this.el.roomList.replaceChildren();
@@ -140,6 +220,54 @@ export class GameUi {
     this.progress = null;
     this.pets = [];
     this.lastSpeed = 0;
+  }
+
+  /**
+   * 抽屉:打开/关闭一个抽屉。同一时间只留一个,避免互相盖住。
+   * (实现见上方 toggleDrawer)
+   */
+
+  /* ------------------------------------------------------------------ *
+   * 皮肤
+   * ------------------------------------------------------------------ */
+  renderSkins() {
+    if (!this.el.skinList) return;
+    this.el.skinList.replaceChildren();
+
+    for (const id of SKIN_ORDER) {
+      const skin = SKINS[id];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `skin-btn${id === this.currentSkinId ? ' is-active' : ''}`;
+      btn.title = skin.label;
+
+      const swatch = document.createElement('span');
+      swatch.className = 'skin-swatch';
+      swatch.style.background = `linear-gradient(135deg, #${skin.body.toString(16).padStart(6, '0')}, #${skin.accent.toString(16).padStart(6, '0')})`;
+
+      const name = document.createElement('span');
+      name.className = 'skin-name';
+      name.textContent = skin.label;
+
+      btn.append(swatch, name);
+      btn.addEventListener('click', () => this.handlers.onPickSkin?.(id, skin.label));
+      this.el.skinList.appendChild(btn);
+    }
+  }
+
+  applySkin(skinId) {
+    this.currentSkinId = skinId;
+    if (!this.el.skinPanel.hidden) this.renderSkins();
+  }
+
+  /** 奖励说明里的数字跟着服务端下发的配置走,避免写死。 */
+  renderRewards() {
+    if (!this.el.rewardsPanel) return;
+    const cleared = this.progress?.clearedStages?.length ?? 0;
+    if (this.el.rewardsProgress) {
+      this.el.rewardsProgress.textContent =
+        cleared === 0 ? 'No stages cleared yet' : `Cleared ${cleared} of ${this.stages.length} stages`;
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -159,13 +287,30 @@ export class GameUi {
     this.el.gems.textContent = String(progress.gems ?? 0);
     this.el.rebirth.textContent = String(progress.rebirth ?? 0);
 
-    // 转生按钮:不足门槛时禁用并显示还差多少
+    // 转生进度条:到门槛就可以点,不足时显示还差多少
     const min = progress.rebirthMinSpeed ?? 100;
     const canRebirth = progress.speed >= min;
-    this.el.btnRebirth.disabled = !canRebirth;
-    this.el.rebirthSub.textContent = canRebirth
-      ? `Reset speed, multiplier \u00d7${formatMultiplier(progress.multiplier * 1.5)}`
-      : `Needs ${min} speed (${Math.ceil(min - progress.speed)} to go)`;
+    const ratio = Math.max(0, Math.min(1, progress.speed / Math.max(1, min)));
+    if (this.el.rebirthFill) {
+      this.el.rebirthFill.style.width = `${(ratio * 100).toFixed(1)}%`;
+    }
+    if (this.el.rebirthMeter) {
+      this.el.rebirthMeter.classList.toggle('is-ready', canRebirth);
+    }
+    if (this.el.rebirthSub) {
+      this.el.rebirthSub.textContent = canRebirth
+        ? `Ready. Resets speed, multiplier becomes \u00d7${formatMultiplier(progress.multiplier * 1.5)}`
+        : `${formatSpeed(progress.speed)} of ${min} speed (${Math.ceil(min - progress.speed)} to go)`;
+    }
+
+    // 侧边栏的转生按钮跟着可用状态走
+    if (this.el.railRebirth) {
+      this.el.railRebirth.disabled = !canRebirth;
+      this.el.railRebirth.classList.toggle('is-ready', canRebirth);
+      // 淡淡的"可以转生了"提示点,不闪烁
+      this.el.railRebirthBadge.hidden = !canRebirth;
+      if (canRebirth) this.el.railRebirthBadge.textContent = 'Ready';
+    }
 
     // 跑步机倒计时
     this.renderTreadmills();
@@ -390,14 +535,17 @@ export class GameUi {
    * ------------------------------------------------------------------ */
   applyPets(pets) {
     this.pets = Array.isArray(pets) ? pets : [];
-    this.el.bagCount.textContent = String(this.pets.length);
+    if (this.el.railPetsBadge) {
+      this.el.railPetsBadge.textContent = String(this.pets.length);
+      this.el.railPetsBadge.hidden = this.pets.length === 0;
+    }
     if (!this.el.bagPanel.hidden) this.renderBag();
   }
 
+  /** 旧接口保留:内部转发到统一的抽屉逻辑 */
   toggleBag(force) {
-    const show = force === undefined ? this.el.bagPanel.hidden : force;
-    this.el.bagPanel.hidden = !show;
-    if (show) this.renderBag();
+    if (force === false) this.el.bagPanel.hidden = true;
+    else this.toggleDrawer('bag-panel');
   }
 
   renderBag() {

@@ -1,9 +1,9 @@
 /* ---------------------------------------------------------------------------
  * Speedy — interface styles
  *
- * Direction: a school running track at dusk. Warm ink neutrals, one amber
- * accent lifted from lane paint, and lane markings as the signature detail.
- * The 3D field carries the colour; the chrome stays quiet.
+ * Direction: a bright tile-pad playground. Cream panels float over a light
+ * teal field, one amber accent for the thing that matters, and the field
+ * itself carries the colour.
  *
  * Every spacing value is a multiple of 4. Radii nest: inner = outer - padding.
  * ------------------------------------------------------------------------- */
@@ -27,34 +27,37 @@
 
 /* --- Tokens --------------------------------------------------------------- */
 :root {
-  /* Warm ink ramp */
-  --surface-deep: #121110;
-  --surface-page: #161513;
-  --surface-card: #1c1a18;
-  --surface-raised: #262421;
+  /* Cream ramp: panels are warm off-white over the bright field */
+  --surface-deep: #e8f1ec;
+  --surface-page: #f2f7f4;
+  --surface-card: #fdfbf6;
+  --surface-raised: #ffffff;
 
-  --text-primary: #efe9de;
-  --text-secondary: #aaa398;
-  --text-muted: #8a847a;
+  --text-primary: #23352f;
+  --text-secondary: #4d635b;
+  --text-muted: #7b8f87;
 
-  --hairline: rgba(239, 233, 222, 0.09);
-  --hairline-strong: rgba(239, 233, 222, 0.15);
+  --hairline: rgba(35, 53, 47, 0.1);
+  --hairline-strong: rgba(35, 53, 47, 0.18);
 
-  /* Lane paint */
-  --accent: #e5a84b;
-  --accent-ink: #2a1c06;
-  --accent-dim: rgba(229, 168, 75, 0.16);
+  /* Tile accent, lifted from the treadmill pads */
+  --accent: #f2a541;
+  --accent-ink: #2f2008;
+  --accent-dim: rgba(242, 165, 65, 0.18);
 
-  --negative: #e5726b;
-  --positive: #7fb886;
+  --negative: #d9534a;
+  --positive: #2fa88b;
 
-  --radius-control: 8px;
-  --radius-card: 14px;
-  --radius-panel: 18px;
+  --radius-control: 10px;
+  --radius-card: 16px;
+  --radius-panel: 20px;
 
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-fast: 140ms;
   --dur-mid: 200ms;
+
+  --shadow-panel: 0 8px 24px rgba(35, 53, 47, 0.12);
+  --shadow-card: 0 2px 8px rgba(35, 53, 47, 0.08);
 
   --font-ui: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -91,7 +94,7 @@ body {
   height: 100%;
 }
 
-/* Neutral vignette so the field's edges fall away instead of ending hard */
+/* Soft light vignette so the field's edges fall away instead of ending hard */
 #app::after {
   content: '';
   position: absolute;
@@ -99,8 +102,8 @@ body {
   pointer-events: none;
   background: radial-gradient(
     ellipse 120% 100% at 50% 45%,
-    transparent 40%,
-    rgba(10, 9, 8, 0.55) 100%
+    transparent 52%,
+    rgba(45, 74, 66, 0.16) 100%
   );
   z-index: 5;
 }
@@ -152,7 +155,7 @@ body {
   align-items: center;
   gap: 32px;
   padding: 16px 24px;
-  background: linear-gradient(to bottom, rgba(18, 17, 16, 0.92), rgba(18, 17, 16, 0));
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0));
   /* 整条 scoreboard 穿透点击,但可交互的按钮要单独打开指针事件,
      否则按钮会被下面的 canvas 抢走点击 */
 }
@@ -387,7 +390,7 @@ body {
   gap: 12px;
   padding: 12px;
   border-radius: var(--radius-control);
-  background: rgba(28, 26, 24, 0.86);
+  background: rgba(255, 255, 255, 0.92);
   border: 1px solid var(--hairline);
   backdrop-filter: blur(8px);
   z-index: 12;
@@ -436,7 +439,7 @@ body {
 }
 
 .mini-btn:hover:not(:disabled) {
-  background: #33302c;
+  background: #e6efea;
   color: var(--text-primary);
 }
 
@@ -537,39 +540,36 @@ body {
   cursor: not-allowed;
 }
 
-.rebirth-btn {
+/* --- 转生进度条 ----------------------------------------------------------- */
+.rebirth-meter {
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(229, 168, 75, 0.4);
-  background: var(--accent-dim);
-  color: var(--text-primary);
-  font-family: inherit;
-  cursor: pointer;
-  text-align: left;
-  transition: background-color var(--dur-fast) var(--ease);
+  gap: 6px;
 }
 
-.rebirth-btn:hover:not(:disabled) {
-  background: rgba(229, 168, 75, 0.24);
-}
-
-.rebirth-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  border-color: var(--hairline);
+.rebirth-meter-track {
+  height: 8px;
+  border-radius: 4px;
   background: var(--surface-deep);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
 }
 
-.rebirth-title {
-  font-size: 13px;
-  font-weight: 500;
+.rebirth-meter-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), #ffc866);
+  transition: width var(--dur-mid) var(--ease);
 }
 
-.rebirth-sub {
+.rebirth-meter.is-ready .rebirth-meter-fill {
+  background: linear-gradient(90deg, #2fa88b, #63d6ad);
+}
+
+.rebirth-meter-text {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
@@ -583,7 +583,7 @@ body {
   width: 208px;
   padding: 12px;
   border-radius: var(--radius-control);
-  background: rgba(28, 26, 24, 0.86);
+  background: rgba(255, 255, 255, 0.92);
   border: 1px solid var(--hairline);
   backdrop-filter: blur(8px);
   z-index: 12;
@@ -636,41 +636,277 @@ body {
   color: var(--accent);
 }
 
-/* --- 背包 / 房间 --------------------------------------------------------- */
-.bag-btn {
+/* --- 通用悬停反馈 --------------------------------------------------------- */
+/* 所有能点的东西在悬停时都要有变化,告诉用户这是按钮 */
+button:not(:disabled),
+.btn,
+.mini-btn,
+.skin-btn,
+.rail-btn {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.mini-btn:hover:not(:disabled) {
+  background: var(--surface-deep);
+  border-color: var(--hairline-strong);
+  color: var(--text-primary);
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.btn:active:not(:disabled),
+.mini-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* --- 侧边图标栏 ----------------------------------------------------------- */
+.rail {
   position: absolute;
-  right: 16px;
-  bottom: 20px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 14;
+}
+
+/* 左侧面板占着左上,侧边栏贴左下,两者不重叠 */
+.rail-left {
+  left: 16px;
+  top: auto;
+  bottom: 96px;
+  transform: none;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.rail-left .rail-btn {
+  width: 64px;
+}
+
+/* 窄屏/矮屏上左侧面板会变长,侧边栏改为贴在面板右侧的一列,
+   避免和面板底部叠在一起 */
+@media (max-height: 700px), (max-width: 900px) {
+  .rail-left {
+    left: 264px;
+    bottom: 96px;
+    flex-direction: column;
+  }
+
+  .rail-left .rail-btn {
+    width: 64px;
+  }
+}
+
+.rail-right {
+  right: 16px;
+}
+
+.rail-btn {
+  position: relative;
+  width: 72px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  border-radius: var(--radius-control);
-  border: 1px solid var(--hairline-strong);
-  background: rgba(28, 26, 24, 0.9);
+  padding: 12px 8px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.94);
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 12px;
   cursor: pointer;
-  z-index: 12;
+  box-shadow: var(--shadow-card);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
-.bag-btn:hover {
-  color: var(--text-primary);
+.rail-btn:hover:not(:disabled) {
   background: var(--surface-raised);
+  color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
-.bag-count {
+.rail-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.rail-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rail-btn.is-ready {
+  border-color: var(--positive);
+  color: var(--positive);
+}
+
+.rail-icon {
+  display: flex;
+  width: 26px;
+  height: 26px;
+}
+
+.rail-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.rail-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.rail-badge {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
   font-size: 10px;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--surface-raised);
-  color: var(--accent);
+  line-height: 16px;
+  text-align: center;
 }
 
-.bag-panel,
-.room-panel {
+.rail-badge-dot {
+  background: var(--positive);
+  color: #ffffff;
+}
+
+.rail-badge[hidden] {
+  display: none;
+}
+
+/* --- 抽屉(宠物 / 皮肤 / 奖励 / 房间)--------------------------------------- */
+.drawer {
+  position: absolute;
+  right: 100px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 300px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(10px);
+  z-index: 20;
+  overflow: hidden;
+}
+
+.drawer-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.drawer-note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* --- 皮肤选择 ------------------------------------------------------------- */
+.skin-list {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.skin-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 4px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--hairline);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.skin-btn:hover {
+  background: var(--surface-deep);
+}
+
+.skin-btn.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.skin-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px var(--hairline-strong);
+}
+
+.skin-name {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* --- 奖励列表 ------------------------------------------------------------- */
+.rewards-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rewards-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.rewards-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.rewards-row dt {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rewards-row dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+/* --- 背包 / 房间 --------------------------------------------------------- */
+
+.drawer {
   position: absolute;
   right: 16px;
   bottom: 60px;
@@ -681,7 +917,7 @@ body {
   gap: 10px;
   padding: 14px;
   border-radius: var(--radius-control);
-  background: rgba(24, 22, 20, 0.96);
+  background: rgba(255, 255, 255, 0.97);
   border: 1px solid var(--hairline);
   backdrop-filter: blur(10px);
   z-index: 20;
@@ -833,7 +1069,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(10, 9, 8, 0.72);
+  background: rgba(45, 74, 66, 0.55);
   backdrop-filter: blur(4px);
   z-index: 60;
 }
@@ -874,11 +1110,11 @@ body {
 
 .btn-danger {
   background: var(--negative);
-  color: #2a0d0b;
+  color: #ffffff;
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #ef827b;
+  background: #d9534a;
 }
 
 .stage-hint {
@@ -888,7 +1124,7 @@ body {
   transform: translateX(-50%);
   padding: 6px 14px;
   border-radius: 6px;
-  background: rgba(28, 26, 24, 0.92);
+  background: rgba(255, 255, 255, 0.95);
   border: 1px solid rgba(229, 168, 75, 0.4);
   color: var(--accent);
   font-size: 12px;
@@ -1046,7 +1282,7 @@ body {
   gap: 20px;
   padding: 10px 16px;
   border-radius: var(--radius-control);
-  background: rgba(28, 26, 24, 0.92);
+  background: rgba(255, 255, 255, 0.95);
   border: 1px solid var(--hairline);
   font-size: 12px;
   color: var(--text-muted);
@@ -1084,10 +1320,10 @@ body {
   padding: 24px;
   background: linear-gradient(
       to right,
-      rgba(18, 17, 16, 0.96) 0%,
-      rgba(18, 17, 16, 0.9) 34%,
-      rgba(18, 17, 16, 0.4) 60%,
-      rgba(18, 17, 16, 0) 80%
+      rgba(247, 252, 250, 0.97) 0%,
+      rgba(247, 252, 250, 0.92) 34%,
+      rgba(247, 252, 250, 0.4) 60%,
+      rgba(247, 252, 250, 0) 80%
     );
   z-index: 50;
 }
@@ -1098,7 +1334,7 @@ body {
   margin-left: clamp(0px, 6vw, 88px);
   padding: 32px;
   border-radius: var(--radius-panel);
-  background: rgba(28, 26, 24, 0.82);
+  background: rgba(255, 255, 255, 0.9);
   border: 1px solid var(--hairline);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(10px);
@@ -1226,7 +1462,7 @@ body {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #f0b960;
+  background: #ffb955;
 }
 
 .btn-ghost {
@@ -1236,7 +1472,7 @@ body {
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: #2e2b28;
+  background: #eaf2ee;
 }
 
 .entry-note {
@@ -1255,7 +1491,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  background: rgba(18, 17, 16, 0.9);
+  background: rgba(255, 255, 255, 0.9);
   z-index: 40;
 }
 
@@ -1287,9 +1523,9 @@ body {
     padding: 16px;
     background: linear-gradient(
         to top,
-        rgba(18, 17, 16, 0.97) 0%,
-        rgba(18, 17, 16, 0.94) 52%,
-        rgba(18, 17, 16, 0.28) 100%
+        rgba(247, 252, 250, 0.97) 0%,
+        rgba(247, 252, 250, 0.94) 52%,
+        rgba(247, 252, 250, 0.28) 100%
       );
   }
 
