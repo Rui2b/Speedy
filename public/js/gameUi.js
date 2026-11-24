@@ -426,26 +426,65 @@ export class GameUi {
    * 这里只做提示,不参与任何判定。
    */
   applyTreadmillAt(context) {
+    // 只比较"身份 + 是否有效",不比较剩余时间:
+    // 剩余时间每分钟都在变,用它做签名会让提示每帧重建。
     const signature = context ? `${context.id}:${context.active}` : '';
-    if (signature === this.lastTreadmillSignature) return;
+    const changed = signature !== this.lastTreadmillSignature;
     this.lastTreadmillSignature = signature;
 
     if (!context) {
       this.hideTreadmillPrompt();
+      this.stopTreadmillCountdown();
       return;
     }
+
     if (context.active) {
-      this.showTreadmillPrompt(
-        `${context.name} active`,
-        `${formatRemaining(Math.max(0, context.untilMs - Date.now()))} of ${context.bonus}\u00d7 speed left`,
-        null,
-      );
+      // 每次进度包都刷新截止时间(续期时会变长),但定时器只建一次
+      this.treadmillDeadline = context.untilMs;
+      this.treadmillBonus = context.bonus;
+      this.treadmillName = context.name;
+      this.startTreadmillCountdown();
+      this.renderTreadmillCountdown();
       return;
     }
+
+    this.stopTreadmillCountdown();
+
+    // 未购买:同一台机器重复下发不必重建 DOM
+    if (!changed) return;
     this.showTreadmillPrompt(
       `${context.name} is locked`,
       `Spend ${context.gemPrice} gems for ${formatMinutes(this.sessionMs)} of ${context.bonus}\u00d7 speed. Standing here does nothing until you buy it.`,
       { label: `Buy ${context.gemPrice} gems`, onClick: () => this.handlers.onBuyTreadmill(context.id) },
+    );
+  }
+
+  /** 每秒刷新跑步机剩余时间;到点立刻收起"加速中"的提示。 */
+  startTreadmillCountdown() {
+    if (this.treadmillTimer) return;
+    // 用 250ms 轮询而不是 1s:时间到的那一刻要立刻反应,
+    // 而不是最多等一整秒才切回"需要购买"。
+    this.treadmillTimer = setInterval(() => this.renderTreadmillCountdown(), 250);
+  }
+
+  stopTreadmillCountdown() {
+    clearInterval(this.treadmillTimer);
+    this.treadmillTimer = null;
+  }
+
+  renderTreadmillCountdown() {
+    const left = Math.max(0, (this.treadmillDeadline ?? 0) - Date.now());
+    if (left <= 0) {
+      // 时间用完:立刻把提示切回"需要购买",不让旧倒计时挂在屏幕上
+      this.stopTreadmillCountdown();
+      this.lastTreadmillSignature = '';
+      this.hideTreadmillPrompt();
+      return;
+    }
+    this.showTreadmillPrompt(
+      `${this.treadmillName ?? 'Treadmill'} active`,
+      `${formatRemaining(left)} of ${this.treadmillBonus}\u00d7 speed left`,
+      null,
     );
   }
 
@@ -804,7 +843,9 @@ function formatMultiplier(value) {
 }
 
 function formatRemaining(ms) {
-  const total = Math.ceil(ms / 1000);
+  // 倒计时用 floor:剩 4.9 秒显示 0:04,而不是跳到 0:05,
+  // 否则读数会停在同一个数字上让人以为时钟没走。
+  const total = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, '0')}`;

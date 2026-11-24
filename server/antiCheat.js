@@ -227,6 +227,24 @@ export function validatePetSteal(player, pet, now) {
 }
 
 /**
+ * 校验一次"捡起野生蛋"。
+ *
+ * 野生蛋是奖励产出的宠物来源(P2 之后不再遍地刷)。
+ * 规则:存在、无主、在范围内。
+ */
+export function validatePetClaim(player, pet) {
+  if (!pet) return { ok: false, reason: 'pet_missing' };
+  if (pet.ownerUid) return { ok: false, reason: 'pet_owned' };
+
+  const dist = planarDistance(player.pos, pet.pos);
+  if (dist > RULES.petStealRadius) {
+    return { ok: false, reason: 'too_far', details: { dist: round(dist), limit: RULES.petStealRadius } };
+  }
+
+  return { ok: true };
+}
+
+/**
  * 校验一次孵化。
  * 规则:必须是自己的宠物、在范围内、已过冷却、未完成孵化。
  */

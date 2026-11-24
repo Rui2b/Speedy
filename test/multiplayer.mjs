@@ -245,11 +245,32 @@ async function main() {
 
   const wild = wildPets[0];
 
-  // 野生宠物不能偷
+  // 野生宠物不能偷,但可以捡(捡和偷是两个动作)
   await a.walkTo(wild.pos, 1.8);
   a.send({ type: 'try_steal_pet', petId: wild.petId });
   const wildResult = await a.waitFor((m) => m.type === 'action_result' && m.action === 'steal_pet');
   check('wild pets cannot be stolen', wildResult.ok === false && wildResult.reason === 'pet_wild', `reason=${wildResult.reason}`);
+
+  // 捡起野生蛋:这是奖励产出的主要入口
+  a.send({ type: 'try_claim_pet', petId: wild.petId });
+  const claimed = await a.waitFor((m) => m.type === 'action_result' && m.action === 'claim_pet', 6000);
+  check('wild egg can be claimed', claimed.ok === true, `reason=${claimed.reason}`);
+
+  const invAfterClaim = await a.waitFor((m) => m.type === 'inventory', 6000);
+  check(
+    'claimed egg lands in the bag',
+    (invAfterClaim.pets ?? []).some((p) => p.petId === wild.petId),
+    `pets=${(invAfterClaim.pets ?? []).length}`,
+  );
+
+  // 已经被捡走的蛋不能再被第二个人捡
+  b.send({ type: 'try_claim_pet', petId: wild.petId });
+  const claimedTwice = await b.waitFor((m) => m.type === 'action_result' && m.action === 'claim_pet', 6000);
+  check(
+    'claimed egg cannot be taken twice',
+    claimedTwice.ok === false && ['pet_owned', 'too_far', 'pet_missing'].includes(claimedTwice.reason),
+    `reason=${claimedTwice.reason}`,
+  );
 
   // 自己的宠物不能偷
   const selfSnap = await a.waitFor((m) => m.type === 'world_snapshot' && Array.isArray(m.pets), 10000);

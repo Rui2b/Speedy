@@ -6,6 +6,7 @@
  */
 import * as THREE from '/vendor/three/three.module.js';
 import { DEFAULT_SKIN, MAP, PALETTE, SIZES, SKINS } from './assets.js';
+import { CharacterInstance, loadCharacter } from './character.js';
 import {
   INTERPOLATION_DELAY_MS,
   SnapshotBuffer,
@@ -84,9 +85,9 @@ export class GameView {
 
     this.buildEnvironment();
     this.buildDecor();
-    this.selfGroup = this.createPlayerMesh({ skinId: DEFAULT_SKIN, isSelf: true });
-    this.selfGroup.visible = false;
-    this.scene.add(this.selfGroup);
+    // 先只建一个空壳:真实皮肤要等 welcome 才知道,
+    // 在这里按默认值加载会白下一份模型
+    this.selfGroup = null;
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
@@ -260,16 +261,18 @@ export class GameView {
     }
     this.entranceGroup = new THREE.Group();
 
-    // 三个入口沿一条直线排在外圈,和"进入关卡"的列表顺序一致
+    // 入口放在场地边缘、玩家出生点(原点附近)看得见的一侧,
+    // 不要放在相机正前方,否则会糊在镜头上。
     const count = Math.min(3, (stages ?? []).length);
-    const spacing = 11;
+    const spacing = 13;
+    const z = MAP.worldRadius - 12;
+
     for (let i = 0; i < count; i += 1) {
       const stage = stages[i];
       const x = (i - (count - 1) / 2) * spacing;
-      const z = MAP.worldRadius - 8;
 
       const pad = new THREE.Mesh(
-        new THREE.BoxGeometry(9, 0.16, 9),
+        new THREE.BoxGeometry(10, 0.18, 10),
         new THREE.MeshStandardMaterial({
           color: PALETTE.stageEntry,
           roughness: 0.75,
@@ -278,16 +281,16 @@ export class GameView {
           emissiveIntensity: 0.1,
         }),
       );
-      pad.position.set(x, 0.1, z);
+      pad.position.set(x, 0.11, z);
       this.entranceGroup.add(pad);
 
-      // 入口中间一个亮色箭头,脚尖方向指向场地中心
+      // 入口中央的箭头,指向场地中心,体积收小避免挡视线
       const arrow = new THREE.Mesh(
-        new THREE.ConeGeometry(1.1, 2.2, 4),
+        new THREE.ConeGeometry(0.9, 1.6, 4),
         new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 }),
       );
-      arrow.rotation.x = Math.PI / 2;
-      arrow.position.set(x, 0.6, z - 5.2);
+      arrow.rotation.x = -Math.PI / 2;
+      arrow.position.set(x, 0.45, z - 3.4);
       this.entranceGroup.add(arrow);
 
       if (stage) pad.userData.stageId = stage.id;
@@ -297,42 +300,73 @@ export class GameView {
   }
 
   /**
-   * 大厅装饰:几个低模方块和立柱,只为消除空旷感。
-   * 全部是 BoxGeometry / CylinderGeometry,加起来十几个 draw call。
+   * 大厅装饰:看台长椅 + 路灯 + 场地边线柱。
+   *
+   * 全部是 Box/Cylinder 基础几何体,十几个 draw call 以内。
+   * 目标是消除空旷感,但每件东西都说得清是什么。
    */
   buildDecor() {
     const group = new THREE.Group();
     const r = MAP.worldRadius - 4;
 
-    // 一圈矮柱,当作场边栏杆柱
-    const postGeo = new THREE.CylinderGeometry(0.28, 0.34, 1.9, 8);
-    const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 });
-    for (let i = 0; i < 16; i += 1) {
-      const angle = (i / 16) * Math.PI * 2;
-      const post = new THREE.Mesh(postGeo, postMat);
-      post.position.set(Math.cos(angle) * r, 0.95, Math.sin(angle) * r);
-      group.add(post);
+    // 场边长椅:一圈矮凳,像学校操场边的看台
+    const benchSeatGeo = new THREE.BoxGeometry(6.4, 0.4, 1.6);
+    const benchLegGeo = new THREE.BoxGeometry(0.44, 0.8, 1.4);
+    const seatMat = new THREE.MeshStandardMaterial({ color: 0xd9a86a, roughness: 0.85 });
+    const legMat = new THREE.MeshStandardMaterial({ color: 0x9a7b52, roughness: 0.9 });
+
+    for (let i = 0; i < 6; i += 1) {
+      const angle = (i / 6) * Math.PI * 2 + Math.PI / 12;
+      const bench = new THREE.Group();
+      const seat = new THREE.Mesh(benchSeatGeo, seatMat);
+      seat.position.y = 1.0;
+      bench.add(seat);
+      for (const side of [-1, 1]) {
+        const leg = new THREE.Mesh(benchLegGeo, legMat);
+        leg.position.set(side * 2.3, 0.4, 0);
+        bench.add(leg);
+      }
+      bench.position.set(Math.cos(angle) * r, 0, Math.sin(angle) * r);
+      // 长椅朝向场地中心
+      bench.rotation.y = -angle + Math.PI / 2;
+      group.add(bench);
     }
 
-    // 几组错落的彩色方块,像场边的器材箱
-    const positions = [
-      [-16, -22, 1.1],
-      [17, -19, 0.9],
-      [-22, 12, 1.3],
-      [21, 15, 1.0],
-      [-6, -30, 0.8],
-      [8, 27, 1.2],
-    ];
-    positions.forEach(([x, z, scale], index) => {
-      const color = PALETTE.decor[index % PALETTE.decor.length];
-      const box = new THREE.Mesh(
-        new THREE.BoxGeometry(3.4 * scale, 1.6 * scale, 3.4 * scale),
-        new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 }),
-      );
-      box.position.set(x, 0.8 * scale, z);
-      box.rotation.y = (index * Math.PI) / 5;
-      group.add(box);
+    // 路灯:灯柱 + 灯头,均匀立在外圈
+    const poleGeo = new THREE.CylinderGeometry(0.18, 0.26, 9, 6);
+    const lampGeo = new THREE.SphereGeometry(0.7, 12, 10);
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x8d9aa0, roughness: 0.6, metalness: 0.3 });
+    const lampMat = new THREE.MeshStandardMaterial({
+      color: 0xfff3c4,
+      emissive: 0xffe9a8,
+      emissiveIntensity: 0.6,
+      roughness: 0.5,
     });
+
+    for (let i = 0; i < 8; i += 1) {
+      const angle = (i / 8) * Math.PI * 2;
+      const px = Math.cos(angle) * (r + 4);
+      const pz = Math.sin(angle) * (r + 4);
+
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(px, 4.5, pz);
+      group.add(pole);
+
+      const lamp = new THREE.Mesh(lampGeo, lampMat);
+      lamp.position.set(px, 9.2, pz);
+      group.add(lamp);
+    }
+
+    // 场地边线柱:短的白柱,把跑动区边界点出来
+    const markerGeo = new THREE.CylinderGeometry(0.28, 0.34, 1.8, 8);
+    const markerMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 });
+    for (let i = 0; i < 12; i += 1) {
+      const angle = (i / 12) * Math.PI * 2;
+      const marker = new THREE.Mesh(markerGeo, markerMat);
+      const mr = MAP.laneSpacing * 2.1 + 1.1;
+      marker.position.set(Math.cos(angle) * mr, 0.9, Math.sin(angle) * mr);
+      group.add(marker);
+    }
 
     this.decorGroup = group;
     this.scene.add(group);
@@ -341,38 +375,21 @@ export class GameView {
   /* ------------------------------------------------------------------ *
    * 模型工厂(换美术资源改这里)
    * ------------------------------------------------------------------ */
+  /**
+   * 造一个玩家。
+   *
+   * 模型是异步加载的(GLB),所以先放一个占位体保证立刻可见,
+   * 加载完成后原地替换。返回的 group 始终是同一个对象,
+   * 外部写入的位置/朝向不会因为替换而丢失。
+   *
+   * @param {{skinId?: string, isSelf?: boolean}} options
+   */
   createPlayerMesh({ skinId, isSelf }) {
     const skin = SKINS[skinId] ?? SKINS[DEFAULT_SKIN];
     const group = new THREE.Group();
+    group.userData.skinId = skinId;
 
-    const body = new THREE.Mesh(
-      new THREE.CapsuleGeometry(SIZES.playerBody.x / 2, SIZES.playerBody.y, 6, 16),
-      new THREE.MeshStandardMaterial({
-        color: skin.body,
-        roughness: 0.72,
-        metalness: 0.04,
-        map: skin.map ?? null,
-      }),
-    );
-    body.position.y = SIZES.playerBody.y / 2 + 0.42;
-    group.add(body);
-
-    const head = new THREE.Mesh(
-      new THREE.SphereGeometry(SIZES.playerHead / 2, 20, 16),
-      new THREE.MeshStandardMaterial({ color: skin.accent, roughness: 0.6 }),
-    );
-    head.position.y = body.position.y + SIZES.playerBody.y / 2 + SIZES.playerHead * 0.42;
-    group.add(head);
-
-    // 一个小鼻尖,方便看出面朝方向
-    const nose = new THREE.Mesh(
-      new THREE.ConeGeometry(SIZES.playerHead * 0.2, SIZES.playerHead * 0.36, 12),
-      new THREE.MeshStandardMaterial({ color: 0xf6f1e6, roughness: 0.5 }),
-    );
-    nose.rotation.x = Math.PI / 2;
-    nose.position.set(0, head.position.y, SIZES.playerHead * 0.5);
-    group.add(nose);
-
+    // 脚下的圈:标出自己/别人,和角色模型无关,始终存在
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(SIZES.ringInner, SIZES.ringOuter, 40),
       new THREE.MeshBasicMaterial({
@@ -387,8 +404,73 @@ export class GameView {
     ring.position.y = 0.04;
     group.add(ring);
 
-    group.userData.skinId = skinId;
+    // 占位体:模型到之前先把人显示出来(胶囊,但只在加载的一瞬间)
+    const placeholder = new THREE.Mesh(
+      new THREE.CapsuleGeometry(SIZES.playerBody.x / 2, SIZES.playerBody.y, 6, 12),
+      new THREE.MeshStandardMaterial({ color: skin.body, roughness: 0.72 }),
+    );
+    placeholder.position.y = SIZES.playerBody.y / 2 + 0.42;
+    group.add(placeholder);
+    group.userData.placeholder = placeholder;
+
+    this.attachCharacter(group, skinId ?? DEFAULT_SKIN);
     return group;
+  }
+
+  /**
+   * 异步加载并挂上真实角色模型。
+   * 用 generation 计数丢弃过期请求:快速连点换皮肤时,晚到的旧模型不能覆盖新的。
+   *
+   * @param {THREE.Group} group
+   * @param {string} skinId
+   */
+  attachCharacter(group, skinId) {
+    group.userData.skinRequest = (group.userData.skinRequest ?? 0) + 1;
+    const request = group.userData.skinRequest;
+
+    loadCharacter(skinId)
+      .then((proto) => {
+        // 期间换过皮肤或对象已被移除,这次结果作废
+        if (group.userData.skinRequest !== request) return;
+        if (!group.parent && group !== this.selfGroup) return;
+
+        const previous = group.userData.character;
+        const character = new CharacterInstance(proto);
+        group.add(character.group);
+        group.userData.character = character;
+
+        // 真实模型就位后去掉占位胶囊
+        const placeholder = group.userData.placeholder;
+        if (placeholder) {
+          placeholder.removeFromParent();
+          placeholder.geometry.dispose();
+          placeholder.material.dispose();
+          group.userData.placeholder = null;
+        }
+
+        if (previous) previous.dispose();
+      })
+      .catch((err) => {
+        // 加载失败就保留占位体,至少玩家还看得见自己
+        console.warn('[character] load failed', skinId, err?.message ?? err);
+      });
+  }
+
+  /** 每帧推进所有角色的动画。 */
+  updateCharacters(dt) {
+    if (this.selfGroup?.userData.character) {
+      const c = this.selfGroup.userData.character;
+      const v = this.predictor?.vel;
+      const speed = v ? Math.hypot(v.x, v.z) : 0;
+      const onGround = this.predictor?.onGround ?? true;
+      c.update(speed, onGround, dt);
+    }
+    for (const entry of this.otherPlayers.values()) {
+      const c = entry.group?.userData.character;
+      if (!c) continue;
+      const speed = entry.lastSpeed ?? 0;
+      c.update(speed, true, dt);
+    }
   }
 
   createGemMesh() {
@@ -562,6 +644,7 @@ export class GameView {
         entry.skinId = p.skinId;
       }
       entry.buffer.push({ at: now, pos: p.pos, speed: p.speed ?? 0 });
+      entry.lastSpeed = p.speed ?? 0;
     }
     for (const [uid, entry] of this.otherPlayers) {
       if (!seen.has(uid)) {
@@ -593,25 +676,30 @@ export class GameView {
       }
     }
 
-    const seenPets = new Set();
-    for (const p of msg.pets ?? []) {
-      seenPets.add(p.petId);
-      let entry = this.petMeshes.get(p.petId);
-      if (!entry) {
-        const group = this.createPetMesh();
-        group.position.set(p.pos.x, 0, p.pos.z);
-        this.petsGroup.add(group);
-        entry = { group, target: { x: p.pos.x, z: p.pos.z }, hatchProgress: 0 };
-        this.petMeshes.set(p.petId, entry);
+    // 宠物位置只在同步帧下发(每 N tick),其他帧没有这个字段。
+    // 这里必须区分"这帧没带宠物"和"这帧没有宠物":当成空数组会把宠物全删掉,
+    // 下一帧再建回来,画面就是一直闪。
+    if (Array.isArray(msg.pets)) {
+      const seenPets = new Set();
+      for (const p of msg.pets) {
+        seenPets.add(p.petId);
+        let entry = this.petMeshes.get(p.petId);
+        if (!entry) {
+          const group = this.createPetMesh();
+          group.position.set(p.pos.x, 0, p.pos.z);
+          this.petsGroup.add(group);
+          entry = { group, target: { x: p.pos.x, z: p.pos.z }, hatchProgress: 0 };
+          this.petMeshes.set(p.petId, entry);
+        }
+        entry.target = { x: p.pos.x, z: p.pos.z };
+        entry.hatchProgress = p.hatchProgress ?? 0;
+        this.updatePetAppearance(entry, p.ownerUid === this.selfUid, Boolean(p.ownerUid));
       }
-      entry.target = { x: p.pos.x, z: p.pos.z };
-      entry.hatchProgress = p.hatchProgress ?? 0;
-      this.updatePetAppearance(entry, p.ownerUid === this.selfUid, Boolean(p.ownerUid));
-    }
-    for (const [id, entry] of this.petMeshes) {
-      if (!seenPets.has(id)) {
-        entry.group.removeFromParent();
-        this.petMeshes.delete(id);
+      for (const [id, entry] of this.petMeshes) {
+        if (!seenPets.has(id)) {
+          entry.group.removeFromParent();
+          this.petMeshes.delete(id);
+        }
       }
     }
   }
@@ -660,6 +748,7 @@ export class GameView {
 
     this.updateSelf(dt);
     this.updateOthers(renderTime);
+    this.updateCharacters(dt);
     this.updateGems(dt);
     this.updatePets(dt);
     this.updateTrails(dt);

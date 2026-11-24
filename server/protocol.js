@@ -11,6 +11,8 @@ export const CLIENT_MESSAGE = {
   PICK_GEM: 'try_pick_gem',
   STEAL_PET: 'try_steal_pet',
   HATCH_PET: 'try_hatch_pet',
+  /** 捡起地上的野生蛋(奖励产出的宠物来源) */
+  CLAIM_PET: 'try_claim_pet',
   /** 转生 */
   REBIRTH: 'request_rebirth',
   /** 用宝石买跑步机时长 */
@@ -92,6 +94,7 @@ export function parseClientMessage(raw) {
       return parseGemAction(data);
     case CLIENT_MESSAGE.STEAL_PET:
     case CLIENT_MESSAGE.HATCH_PET:
+    case CLIENT_MESSAGE.CLAIM_PET:
       return parsePetAction(data, type);
     case CLIENT_MESSAGE.REBIRTH:
     case CLIENT_MESSAGE.REQUEST_LEADERBOARD:

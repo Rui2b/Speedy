@@ -22,7 +22,9 @@ import {
   recordStrike,
   startCooldown,
   validateGemPickup,
-  validateMovement,  validatePetHatch,
+  validateMovement,
+  validatePetClaim,
+  validatePetHatch,
   validatePetSteal,
 } from './antiCheat.js';
 import { buildStageRuntime, canEnterStage, serializeStage } from './obby.js';
@@ -399,6 +401,7 @@ export class GameRoom {
       case CLIENT_MESSAGE.PICK_GEM:
       case CLIENT_MESSAGE.STEAL_PET:
       case CLIENT_MESSAGE.HATCH_PET:
+      case CLIENT_MESSAGE.CLAIM_PET:
         this.handleAction(session, parsed.type, parsed.payload, now).catch((err) => {
           log.error('操作处理异常', { uid: session.uid, message: err.message });
           session.send(SERVER_MESSAGE.ACTION_RESULT, {
@@ -686,6 +689,8 @@ export class GameRoom {
         return this.doStealPet(session, player, payload, now);
       case CLIENT_MESSAGE.HATCH_PET:
         return this.doHatchPet(session, player, payload, now);
+      case CLIENT_MESSAGE.CLAIM_PET:
+        return this.doClaimPet(session, player, payload, now);
       default:
         return undefined;
     }
@@ -834,11 +839,64 @@ export class GameRoom {
     session.send(SERVER_MESSAGE.INVENTORY, { gems: player.gems, pets: this.buildPetList(player) });
   }
 
+  /**
+   * 捡起地上的野生蛋。
+   *
+   * 野生蛋是奖励产出的宠物来源。捡起来就归这个玩家,之后照常孵化。
+   * 全部服务端判定:距离、无主、存在性都在这里复核。
+   */
+  async doClaimPet(session, player, payload, now) {
+    const room = this.roomOf(session);
+    if (!room) return;
+
+    const pet = room.world.pets.get(payload.petId);
+    const check = validatePetClaim(player, pet);
+    if (!check.ok) {
+      logCheat({
+        reason: 'invalid_action',
+        action: 'claim_pet',
+        uid: player.uid,
+        details: { result: check.reason, ...(check.details ?? {}), petId: payload.petId },
+      });
+      session.send(SERVER_MESSAGE.ACTION_RESULT, {
+        action: 'claim_pet',
+        ok: false,
+        reason: check.reason,
+      });
+      return;
+    }
+
+    // 立刻标记归属,防止两个人同一帧抢同一颗蛋
+    pet.ownerUid = player.uid;
+    pet.claimedAt = now;
+    pet.stealCooldownUntil = now + RULES.petStealCooldownMs;
+    player.petIds.add(pet.petId);
+    room.rosterDirty = true;
+
+    try {
+      await this.store.upsertOwnedPet(pet.petId, player.uid, pet);
+    } catch (err) {
+      log.warn('写入宠物归属失败', { petId: pet.petId, message: err.message });
+    }
+
+    session.send(SERVER_MESSAGE.ACTION_RESULT, {
+      action: 'claim_pet',
+      ok: true,
+      petId: pet.petId,
+      species: pet.species,
+      rarity: pet.rarity,
+    });
+    session.send(SERVER_MESSAGE.INVENTORY, {
+      gems: player.gems,
+      pets: this.buildPetList(player),
+    });
+    log.info('玩家捡起野生蛋', { uid: player.uid, petId: pet.petId, rarity: pet.rarity });
+  }
+
   /* ------------------------------------------------------------------ *
    * 主循环
    * ------------------------------------------------------------------ */
-  tick() {
-    const now = Date.now();
+  tick() {    const now = Date.now();
     const dtMs = now - this.lastTickAt;
     this.lastTickAt = now;
     const dt = Math.min(dtMs, TIMING.tickMs * 4) / 1000;

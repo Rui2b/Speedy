@@ -283,6 +283,10 @@ export class NetClient {
     return this.send({ type: 'try_hatch_pet', petId });
   }
 
+  tryClaimPet(petId) {
+    return this.send({ type: 'try_claim_pet', petId });
+  }
+
   dispose() {
     document.removeEventListener('visibilitychange', this._boundVisibility);
     this.disconnect();

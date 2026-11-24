@@ -9,7 +9,7 @@ import { GameView } from './render.js';
 import { Hud } from './hud.js';
 import { InputController } from './input.js';
 import { NetClient } from './net.js';
-import { ACTION_KEYS, findNearestGem, findNearestPet } from './targeting.js';
+import { ACTION_KEYS, findNearestPet, findNearestWildPet } from './targeting.js';
 import { TurnstileGate } from './turnstile.js';
 import { LocalPredictor } from './predictor.js';
 import { GameUi } from './gameUi.js';
@@ -392,23 +392,23 @@ function handleServerMessage(msg) {
       // 右上角显示当前账号
       if (el.hudUser) el.hudUser.textContent = state.userName;
 
+      // 皮肤先定下来,再让 applyWelcome 建模型,避免先加载 classic 再换成别的
+      const serverSkin = msg.skinId ?? DEFAULT_SKIN;
+      const skin = serverSkin === DEFAULT_SKIN ? pickStarterSkin(msg.uid) : serverSkin;
+      state.skinId = skin;
+      net.skinId = skin;
+      view.currentSkinId = skin;
+
       // 用服务器下发的物理常量建本地预测器,保证两边参数同源
       if (msg.physics) {
         predictor = new LocalPredictor(msg.physics);
         predictor.snapTo(state.lastSelfPos);
         view.predictor = predictor;
-
-        // 服务器存档里还是默认皮肤时,给这个账号挑一个稳定的区分色,
-        // 让场上的颜色天然错开。已有皮肤的账号保持原样。
-        const serverSkin = msg.skinId ?? DEFAULT_SKIN;
-        const skin = serverSkin === DEFAULT_SKIN ? pickStarterSkin(msg.uid) : serverSkin;
-        state.skinId = skin;
-        net.skinId = skin;
-        view.currentSkinId = skin;
         view.ensureTrail(skin);
       }
 
-      view.applyWelcome(msg);
+      // applyWelcome 会按 msg.skinId 建模型,所以把已决定的皮肤写回去
+      view.applyWelcome({ ...msg, skinId: skin });
       if (Array.isArray(msg.stages)) view.buildStages(msg.stages);
 
       gameUi.applyWelcome(msg);
@@ -426,9 +426,10 @@ function handleServerMessage(msg) {
       state.speed = msg.speed;
       gameUi.applyProgress(msg);
       hud.setOnline(state.online);
-      // 踏板高亮跟着"我买了哪台"走,同时驱动站上去未购买时的提示
       view.treadmillActiveUntil = msg.treadmills ?? {};
-      gameUi.applyTreadmillAt(msg.treadmillAt ?? null);
+      if (!window.__speedy?.previewFreeze) {
+        gameUi.applyTreadmillAt(msg.treadmillAt ?? null);
+      }
       break;
 
     case 'leaderboard':
@@ -540,6 +541,14 @@ const ACTION_TEXT = {
       already_hatched: 'That pet is already hatched',
       cooldown: 'Hatching is still on cooldown',
       pet_missing: 'That pet is gone',
+    },
+  },
+  claim_pet: {
+    ok: 'Egg picked up',
+    fail: {
+      too_far: 'Too far from that egg',
+      pet_owned: 'Someone already took that egg',
+      pet_missing: 'That egg is gone',
     },
   },
   pet_lost: { ok: '', fail: { stolen: 'Your pet was stolen' } },
@@ -710,25 +719,34 @@ function handleActionKey(event) {
   }
 }
 
+/**
+ * E 键:优先捡野生蛋,其次是偷别人的,自己的一律提示用 F 孵化。
+ *
+ * 宝石已经从地图上移除了,所以这里不再找宝石。
+ */
 function doPickOrSteal() {
   const pos = state.lastSelfPos;
 
-  const gemId = findNearestGem(state.gemsById, pos, 3.2);
-  if (gemId) {
-    net.tryPickGem(gemId);
+  const wildId = findNearestWildPet(state.petsById, pos, 3.2);
+  if (wildId) {
+    net.tryClaimPet(wildId);
     return;
   }
 
   const petId = findNearestPet(state.petsById, pos, 3.2, state.uid);
   if (petId) {
     const pet = state.petsById.get(petId);
-    if (!pet || pet.ownerUid === null) hud.toast('Wild pets cannot be stolen', 'bad');
-    else if (pet.ownerUid === state.uid) hud.toast('That is your pet. Press F to hatch', 'bad');
-    else net.tryStealPet(petId);
+    if (!pet) {
+      hud.toast('That pet is gone', 'bad');
+    } else if (pet.ownerUid === state.uid) {
+      hud.toast('That is your pet. Press F to hatch', 'bad');
+    } else {
+      net.tryStealPet(petId);
+    }
     return;
   }
 
-  hud.toast('Nothing to collect nearby', '');
+  hud.toast('Nothing to pick up nearby', '');
 }
 
 function doHatch() {
@@ -811,6 +829,26 @@ if (typeof window !== 'undefined') {
      */
     previewReward(amount = 2, detail = 'first clear') {
       gameUi.floatReward(String(amount), detail);
+    },
+    /** 跑步机提示的状态,排查倒计时用 */
+    get treadmillPrompt() {
+      const el = document.getElementById('treadmill-prompt');
+      return {
+        hidden: el?.hidden ?? true,
+        title: document.getElementById('treadmill-prompt-title')?.textContent ?? '',
+        body: document.getElementById('treadmill-prompt-body')?.textContent ?? '',
+      };
+    },
+    /** 直接喂一份跑步机上下文,用于验证倒计时刷新与到期归零 */
+    previewTreadmill(context) {
+      // 真实 progress 每 100ms 会覆盖这个状态,所以这里同时停掉覆盖源,
+      // 让预览能稳定观察几秒。
+      this.previewFreeze = true;
+      gameUi.applyTreadmillAt(context);
+    },
+    /** 恢复被 progress 驱动的正常状态 */
+    endPreview() {
+      this.previewFreeze = false;
     },
   };
 }
